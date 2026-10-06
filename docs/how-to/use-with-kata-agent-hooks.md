@@ -1,0 +1,25 @@
+# Use with Kata agent hooks
+
+Kata's native hooks provide contract/inbox context and optional session attention. This repository adds delegated issue tracking or todo plans. Native attention requires Kata 0.19.
+
+## Claude Code
+
+```sh
+kata agent-hook install claude --attention
+```
+
+Use the native adapter for the lead session's contract and attention. The Claude plugin caches the canonical contract and injects it into tracked Agent prompts along with each child's ref and teammate. It does not inject a second lead contract or implement lead session attention. Workflow agents cannot receive this injection on the tested Claude API.
+
+## Pi
+
+```sh
+kata agent-hook install pi --attention
+```
+
+The pi plugin checks the native adapter registry at prompt time. When a contract-enabled adapter covers the current folder, native code alone fetches and inserts contract/inbox sections. Otherwise, the plugin provides those sections. The `kata_todo` section is separate and other extensions' sections are preserved.
+
+The plugin preserves the native parent attention baseline regardless of startup handler order, then clears `KATA_REF` from the parent process environment. Child processes inherit the plugin's own parent marker instead, receive a distinct teammate and issue binding, and always receive their contract. Native child startup/shutdown therefore cannot target the lead issue. Todo start/block operations still update their task's guarded attention; unfinished children request review on their own issues. See the [pi reference](../reference/pi.md).
+
+## Oh-my-pi
+
+OMP retains its existing guarded main-session attention handling. Do not install another session-attention writer for the same issue alongside it. Subagents receive their own binding and do not run the lead's attention transitions.

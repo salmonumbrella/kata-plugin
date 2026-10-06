@@ -1,0 +1,16 @@
+{
+  "name": "kata-plugin",
+  "owner": {
+    "name": "salmonumbrella"
+  },
+  "plugins": [
+    {
+      "name": "kata",
+      "description": "Kata work tracking for claude-code",
+      "source": "./plugins/claude-code"
+    }
+  ],
+  "metadata": {
+    "description": "Kata work tracking for coding agents"
+  }
+}

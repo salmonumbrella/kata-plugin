@@ -1,0 +1,36 @@
+{
+  "name": "kata-plugin",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Kata work tracking for Claude Code, oh-my-pi, and pi",
+  "license": "MIT",
+  "author": "salmonumbrella",
+  "keywords": [
+    "pi-package"
+  ],
+  "workspaces": [
+    "plugins/*"
+  ],
+  "pi": {
+    "extensions": [
+      "./plugins/pi/kata.ts"
+    ]
+  },
+  "scripts": {
+    "test": "bun tests/run.ts all",
+    "test:todo": "bun tests/run.ts",
+    "test:claude": "bun tests/run.ts claude",
+    "test:revisions": "bun tests/run.ts revisions",
+    "build:plugins": "bun scripts/vendor-core.ts",
+    "check:plugins": "bun scripts/vendor-core.ts --check",
+    "typecheck": "tsc -p tsconfig.json && tsc -p plugins/claude-code",
+    "validate": "claude plugin validate plugins/claude-code && claude plugin validate .claude-plugin/marketplace.json"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "1.0.2",
+    "@types/node": "25.9.2",
+    "typescript": "5.9.3",
+    "typebox": "1.3.27"
+  }
+}

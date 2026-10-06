@@ -1,0 +1,19 @@
+{
+  "compilerOptions": {
+    "noEmit": true,
+    "strict": true,
+    "skipLibCheck": true,
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "types": [
+      "node"
+    ]
+  },
+  "include": [
+    "kata.ts",
+    "core/**/*.ts",
+    "plugins/oh-my-pi/*.ts",
+    "plugins/pi/*.ts"
+  ]
+}

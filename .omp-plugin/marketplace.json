@@ -1,0 +1,16 @@
+{
+  "name": "kata-plugin",
+  "owner": {
+    "name": "salmonumbrella"
+  },
+  "plugins": [
+    {
+      "name": "kata",
+      "description": "Kata work tracking for oh-my-pi",
+      "source": "./plugins/oh-my-pi"
+    }
+  ],
+  "metadata": {
+    "description": "Kata work tracking for coding agents"
+  }
+}
