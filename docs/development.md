@@ -10,7 +10,7 @@ bun run typecheck
 bun run validate
 ```
 
-`test` runs OMP/pi tests, Claude engine tests, property tests, real-Kata integration tests, and revision conformance. The Claude engine runner requires a valid successful native report from every file; exit zero alone is insufficient. Before the first typecheck, load the Claude plugin once in an isolated live session as described below. Claude writes version-specific API declarations to the ignored `.claude-plugin/types/` directory on live load; the engine test runner does not generate them.
+The real native pi adapter tests need `kata agent-hook install pi`, which exists on Kata main but in no release yet; against a Kata without it they are skipped with that reason, never faked. `test` runs OMP/pi tests, Claude engine tests, property tests, real-Kata integration tests, and revision conformance. The Claude engine runner requires a valid successful native report from every file; exit zero alone is insufficient. Before the first typecheck, load the Claude plugin once in an isolated live session as described below. Claude writes version-specific API declarations to the ignored `.claude-plugin/types/` directory on live load; the engine test runner does not generate them.
 
 Focused runners retain the isolation wrapper:
 

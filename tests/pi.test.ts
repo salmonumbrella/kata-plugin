@@ -70,8 +70,15 @@ async function host(options: any = {}) {
     },
   };
 }
+// `kata agent-hook install pi` (the native pi adapter) exists on kenn-io/kata main
+// since #466/#475 but in no release yet (v0.18.0 lacks it). Tests that load the
+// native adapter run only when the Kata under test has it; they never fake it.
+const nativeHelp = await run(["agent-hook", "install", "--help"]);
+const nativeMissing = nativeHelp.code ? "Kata under test lacks `agent-hook install` (unreleased; kenn-io/kata main after #475)" : undefined;
+if (nativeMissing) console.warn(`Skipping real native pi adapter tests: ${nativeMissing}`);
 beforeAll(async () => {
   const out = await run(["init", "--project", "pitest"]); if (out.code) throw new Error(out.stderr);
+  if (nativeMissing) return;
   const native = await run(["agent-hook", "install", "pi", "--scope", "project", "--executable", binary]);
   if (native.code) throw new Error(native.stderr);
 });
@@ -126,7 +133,7 @@ test("pi uses structured prompt sections, preserves other extensions, and caches
   expect(await app.event("before_agent_start", prompt)).toBeUndefined();
   const sections = prompt.systemPromptOptions.sections as any;
   expect(sections.authored).toBe("keep me"); expect(sections.kata_todo).toContain(ref);
-  const contract = JSON.parse((await run(["agent-contract-hook"])).stdout).hookSpecificOutput.additionalContext;
+  const contract = JSON.parse((await run(["agent-contract-hook", "--source", "kata-agent-contract-hook"])).stdout).hookSpecificOutput.additionalContext;
   expect(sections.kata_contract).toBe(contract);
   await app.event("before_agent_start", prompt);
   expect(app.calls.filter(a => a[0] === "agent-contract-hook")).toHaveLength(1);
@@ -275,7 +282,7 @@ for (const match of ["named", "active", "separate"]) test(`pi child ${match} bin
 });
 
 
-for (const order of ["plugin-first", "native-first"]) test(`real native adapter preserves parent attention with ${order}`, async () => {
+for (const order of ["plugin-first", "native-first"]) test.skipIf(!!nativeMissing)(`real native adapter preserves parent attention with ${order}`, async () => {
   const ref = (await kata(["create", "Real native ordering parent", "--force-new", "--json"])).issue.short_id;
   await kata(["claim", ref, "--json"]);
   process.env.KATA_REF = `pitest#${ref}`;

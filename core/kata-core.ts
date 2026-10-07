@@ -200,8 +200,8 @@ export function createKataCore(host: CoreHost, options: CoreOptions) {
 		finally { clearTimeout(timer!); }
 	}
 
-	async function kata(args: string[], cwd: string, timeout = 1000): Promise<string> {
-		const result = await host.exec(options.executable, [...args, "--workspace", path.resolve(cwd)], { cwd, timeout });
+	async function kata(args: string[], cwd: string, timeout = 1000, workspace = true): Promise<string> {
+		const result = await host.exec(options.executable, workspace ? [...args, "--workspace", path.resolve(cwd)] : args, { cwd, timeout });
 		if (result.code !== 0 || result.killed) {
 			const detail = (result.stderr || result.stdout || "").trim().split("\n").slice(-3).join(" ");
 			throw new Error(`kata ${args[0]} failed${detail ? `: ${detail}` : ""}`);
@@ -859,7 +859,8 @@ export function createKataCore(host: CoreHost, options: CoreOptions) {
 		entry.pending = (async () => {
 			if (!await probe(cwd)) return;
 			const [contract, inbox] = await Promise.allSettled([
-				kata(["agent-contract-hook"], cwd).then(out => JSON.parse(out)?.hookSpecificOutput?.additionalContext),
+				// Exactly these arguments: some Kata builds print nothing for any other form.
+				kata(["agent-contract-hook", "--source", "kata-agent-contract-hook"], cwd, 1000, false).then(out => JSON.parse(out)?.hookSpecificOutput?.additionalContext),
 				process.env.KATA_INBOX_USER ? kata(["inbox", "--context", "--for", process.env.KATA_INBOX_USER], cwd) : Promise.resolve(undefined),
 			]);
 			if (contract.status === "fulfilled" && typeof contract.value === "string") entry.contract = contract.value;

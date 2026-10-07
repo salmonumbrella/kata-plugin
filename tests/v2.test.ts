@@ -136,7 +136,7 @@ test("contract is cached verbatim, inbox cached, slow hooks bounded and failures
   const app = host(); await app.event("session_start");
   const first = await app.event("before_agent_start", { systemPrompt: ["base"] });
   const second = await app.event("before_agent_start", { systemPrompt: ["base"] });
-  const contract = JSON.parse((await run(["agent-contract-hook"])).stdout).hookSpecificOutput.additionalContext;
+  const contract = JSON.parse((await run(["agent-contract-hook", "--source", "kata-agent-contract-hook"])).stdout).hookSpecificOutput.additionalContext;
   expect(first.systemPrompt.join("\n")).toContain(contract);
   expect(second.systemPrompt.join("\n")).toContain(contract);
   expect(app.calls.filter(a => a[0] === "agent-contract-hook")).toHaveLength(1);
@@ -170,7 +170,7 @@ test("spawn creates a teammate child; subagent gets verbatim contract and closes
   const teammate = tracked.metadata.teammate;
   expect(teammate).toMatch(/^[a-z0-9][a-z0-9._-]{0,63}$/);
   expect(prompt.systemPrompt.join("\n")).toContain(`v2test#${tracked.short_id}`);
-  const contract = JSON.parse((await run(["agent-contract-hook"])).stdout).hookSpecificOutput.additionalContext;
+  const contract = JSON.parse((await run(["agent-contract-hook", "--source", "kata-agent-contract-hook"])).stdout).hookSpecificOutput.additionalContext;
   expect(prompt.systemPrompt.join("\n")).toContain(contract);
   const rewritten = await child.event("tool_call", { toolName: "bash", input: { command: `kata close v2test#${tracked.short_id} --done --message '${message}' --test 'subagent verification'` } });
   expect(rewritten.input.command).toContain(`--teammate '${teammate}'`);
