@@ -240,12 +240,38 @@ test("timing and coprocess keywords cannot hide Kata impersonation", () => {
   assert.equal(rewriteKata("./do kata show c1", "tester-123abc"), "./do kata show c1");
 });
 
-test("session titles retain the first 70 normalized prompt characters for arbitrary Unicode data", async () => {
+test("session titles are one bounded line for arbitrary Unicode data", async () => {
   const { sessionDescription } = await import("../hooks/session.ts");
   fc.assert(fc.property(fc.string({unit: "binary"}), fc.string({unit: "binary"}), (prompt, id) => {
     const result = sessionDescription(prompt, id);
-    const normalized = prompt.trim().split(/\s+/).join(" ");
-    assert.equal(result.title, "Claude session: " + (normalized || id).slice(0, 70));
+    assert.ok(result.title.startsWith("Claude session: "));
+    assert.ok(result.title.length <= "Claude session: ".length + 60, result.title);
+    assert.equal(result.title, sessionDescription(prompt, id).title);
+  }), {numRuns:1000});
+});
+test("plain-word session titles end on a whole word of the prompt's first sentence", async () => {
+  const { promptTitle } = await import("../hooks/session.ts");
+  const word = fc.stringMatching(/^[a-z]{2,12}$/).filter(w => !["please","pls","hey","hi","hello","ok","okay","so","now","then","also","claude","can","could","would","will","help","lets","i"].includes(w));
+  fc.assert(fc.property(fc.array(word, {minLength: 2, maxLength: 40}), (words) => {
+    const prompt = words.join(" ");
+    const title = promptTitle(prompt);
+    if (title === undefined) return;
+    assert.ok(title.length <= 60, title);
+    const lower = title.toLowerCase();
+    assert.ok(prompt.startsWith(lower), title);
+    assert.ok(prompt.length === lower.length || prompt[lower.length] === " ", "cut mid-word: " + title);
+  }), {numRuns:1000});
+});
+test("the first ownership-marked Kata ref wins over context and later refs", async () => {
+  const { namedIssue } = await import("../hooks/refs.ts");
+  const id = fc.stringMatching(/^[0-9a-hjkmnp-tv-z]{4}$/), project = fc.stringMatching(/^[a-z][a-z0-9-]{0,10}$/);
+  const filler = fc.string().map(s => s.replace(/[#\w]/g, " "));
+  fc.assert(fc.property(project, id, project, id, filler, filler, (p1, i1, p2, i2, before, after) => {
+    const owned = `${p1}#${i1}`, other = `${p2}#${i2}`;
+    const prompt = `${before} (parent ${other}) Kata issue: ${owned} ${after} also ${other}`;
+    assert.equal(namedIssue(["", prompt]).ref, owned);
+    const chosen = namedIssue([before, after]).ref;
+    assert.equal(chosen, undefined);
   }), {numRuns:1000});
 });
 test("session bodies preserve bounded original prompt data and session identity", async () => {

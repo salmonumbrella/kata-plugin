@@ -193,6 +193,53 @@ test("real registered hooks close verified delegated work and its automatic pare
   } finally { await h.stop(); }
 });
 
+test("real spawn naming an existing issue binds to it and creates no child or session issue", async () => {
+  const h = await fixture({ bound: false });
+  try {
+    const named = (await h.json(["create", "Existing named work", "--force-new"])).issue.short_id;
+    const other = (await h.json(["create", "Context-only parent", "--force-new"])).issue.short_id;
+    const before = (await h.json(["list", "--status", "all", "--limit", "100"])).issues.length;
+    await h.dispatch("session.start", { cwd: h.cwd, surface: null, isInteractive: false });
+    let injected = "";
+    await h.dispatch("agent.spawn", {
+      tool_use_id: "named-child", prompt: `Kata issue: realtest#${named} (parent realtest#${other}). Implement and test it.`, description: "Named work",
+      subagentType: "general-purpose", provider: { plugin: "engine", tier: "core" }, parentModel: "sonnet", background: false, fork: false,
+    }, async e => { injected = e.prompt; return { model: "sonnet", agentId: "named-child" }; });
+    assert.equal(h.entry("named-child")?.ref, `realtest#${named}`);
+    // The binding line rides on the canonical contract; Kata builds without
+    // `agent-contract-hook` output leave the prompt untouched (engine tests cover the line).
+    if (/Kata is the system of record/.test(injected)) assert.ok(injected.includes(`tracked as realtest#${named} (the issue named in your task`), injected);
+    else assert.ok(injected.startsWith("Kata issue: realtest#"), injected);
+    await h.waitFor(async () => (await h.json(["show", named])).issue.metadata?.["claude.agent_id"] === "named-child", "bound agent id");
+    await h.finish("named-child", "Implemented the named work; the lead closes it after review.");
+    const after = (await h.json(["list", "--status", "all", "--limit", "100"])).issues;
+    assert.equal(after.length, before, JSON.stringify(after.map(i => i.title)));
+    const view = await h.json(["show", named]);
+    assert.equal(view.issue.status, "open");
+    assert.equal(view.issue.metadata["claude.status"], "completed");
+    assert.equal(view.issue.metadata["claude.tool_use_id"], "named-child");
+    assert.match(String(view.issue.metadata["claude.teammate"]), /^general-purpose-/);
+    assert.ok(!Object.keys(view.issue.metadata).some(key => key.startsWith("work.")));
+    assert.ok((view.comments ?? []).some(c => c.body.includes("Implemented the named work")));
+    assert.equal(h.stored.get("session/real-session/binding/parent")?.autoParent, undefined);
+  } finally { await h.stop(); }
+});
+
+test("real session whose first prompt names an issue parents children there without a session issue", async () => {
+  const h = await fixture({ bound: false });
+  try {
+    const named = (await h.json(["create", "Session work named by the user", "--force-new"])).issue.short_id;
+    await h.dispatch("session.start", { cwd: h.cwd, surface: null, isInteractive: false });
+    await h.dispatch("prompt.submit", { text: `You own Kata issue realtest#${named}. Split the work across helpers.`, wait: false, origin: { kind: "composer" } });
+    await h.spawn("helper"); const ref = await h.ready("helper");
+    const child = await h.json(["show", ref]);
+    const parent = await h.json(["show", named]);
+    assert.ok((parent.children ?? []).some(c => c.short_id === child.issue.short_id), JSON.stringify(parent.children));
+    const sessions = (await h.json(["list", "--status", "all", "--label", "claude-session", "--limit", "100"])).issues ?? [];
+    assert.equal(sessions.length, 0);
+  } finally { await h.stop(); }
+});
+
 for (const reason of ["No", null]) test(`real registered hooks close denied spawn (${reason ?? "no agent id"}) as wontfix with the canonical message floor`, async () => {
   const h = await fixture();
   try {

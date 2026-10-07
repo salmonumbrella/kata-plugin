@@ -31,6 +31,10 @@ export type KataEntry = {
   priorReplies?: KataReply[];
   finished?: { from: string; timestamp: string; result: string };
   finishedThrough?: string;
+  /** Tracking is bound to an existing issue the spawn named; no child was created. */
+  bound?: boolean;
+  /** Why a named issue was not bound (written as claude.binding_note on the child). */
+  bindingNote?: string;
 };
 export type KataOperation = {
   id: string;
@@ -67,6 +71,10 @@ export type KataSession = {
   autoParentClosed?: boolean;
   firstPrompt?: string;
   firstPromptTitle?: string;
+  /** Issue the first user prompt names as its work; adopted as parent at first delegation. */
+  promptRef?: string;
+  /** Why the first prompt's named issue was not adopted. */
+  promptRefNote?: string;
   sessionName?: string;
   bindingVersion?: number;
   cwd?: string;

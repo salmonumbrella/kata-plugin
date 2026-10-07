@@ -5,7 +5,7 @@ Plugin ID: `kata@kata-plugin`. Entry: `plugins/claude-code/hooks/register.ts`. I
 | Surface | Behavior |
 | --- | --- |
 | `session.start`, `classic.SessionStart`, `prompt.submit` | Restore binding, cache contract, recover pending work, record session description. |
-| `agent.spawn` | Record launch intent, create an attributed child, inject contract and close instructions, join native identity. |
+| `agent.spawn` | Record launch intent, bind to the issue the spawn names or else create an attributed child, inject contract and close instructions, join native identity. |
 | `tool.call`, `turn.start`, `turn.complete` | Observe activity and verification, protect attribution, reconcile terminal work. |
 | `session.receive`, `session.append` | Join verified teammate receipts and local/remote workflow results. |
 | `classic.Stop`, `session.end` | Respect native work and lead settlement; attempt bounded reconciliation. |
@@ -21,6 +21,8 @@ Options in `pluginConfigs.kata.options` (an installed plugin may use the full ID
 Other foreground hooks retain short deadlines. Effects persist across reload/resume with pinned project, workspace, session, and execution scope. Transport outages back off from 1 to 60 seconds; close throttles retry after 60 seconds. Debug output goes to Claude's log, without warning UI.
 
 Delegates keep the actor and receive distinct teammates. Recognized Bash invocations receive teammate attribution; `--as` impersonation is refused. Explicit teammate flags remain. Embedded scripts must supply their own binding command. This lexical handling is not a shell sandbox.
+
+A spawn that names an existing open issue is tracked on it rather than a new child; see [bind work to an issue](../how-to/bind-work-to-an-issue.md). On a bound issue the plugin writes only `claude.*` metadata and its report comment; it never closes or labels it. The contract is fetched with `kata agent-contract-hook --source kata-agent-contract-hook`.
 
 The agent should close its own issue. A conservative verification fallback can close an open child; see [closing rules](closing-rules.md). Agent-closed issues retain their reports, labels, closure and `work.*`; only terminal `claude.status` may be updated with a revision guard. Failure, kill, or insufficient proof leaves open work with `needs-review`.
 

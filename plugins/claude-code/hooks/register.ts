@@ -12,7 +12,8 @@ import {
 import { evidenceArgs, updateVerification, canClose, incompleteAnswer, documentationOnly, documentationStatement, observedWritePaths } from "./evidence.ts";
 import type { Verification } from "./evidence.ts";
 import { workflowCompletion, workflowEvidenceArgs, closeEvidenceArgs } from "./completion.ts";
-import { sessionDescription } from "./session.ts";
+import { sessionDescription, promptTitle } from "./session.ts";
+import { namedIssue, definitelyMissing } from "./refs.ts";
 import { workflowDelivery, teammateFinished, workflowSummary } from "./notifications.ts";
 import type {
   KataEntry,
@@ -67,7 +68,7 @@ async function refreshContract($: EngineInterface, captured?: {id: string; cwd?:
   try {
     const timeoutMs = Math.floor(deadline === undefined ? 1000 : Math.min(timeoutLimit, deadline - await $.clock.now()));
     if (timeoutMs <= 0) throw new Error("Contract foreground budget exhausted");
-    const output = await $.process.run([kata, "agent-contract-hook"], {timeoutMs, cwd: context.cwd});
+    const output = await $.process.run([kata, "agent-contract-hook", "--source", "kata-agent-contract-hook"], {timeoutMs, cwd: context.cwd});
     if (output.exitCode === 0) {
       const context = JSON.parse(output.stdout)?.hookSpecificOutput?.additionalContext;
       if (typeof context === "string" && context) { text = context; recovered = true; }
@@ -108,7 +109,8 @@ async function trimStore($: EngineInterface) {
     }
     rows.set(key, value);
     if ((key.includes("/op/") && !(value as KataOperation).ack) ||
-        ((key.includes("/spawn/") || key.includes("/run/")) && !(value as KataEntry).closedBy) ||
+        ((key.includes("/spawn/") || key.includes("/run/")) && !(value as KataEntry).closedBy &&
+          !((value as KataEntry).bound && ["completed", "failed", "killed", "denied", "session-ended"].includes((value as KataEntry).status))) ||
         (key.includes("/retained-parent/") && !(value as KataSession).autoParentClosed) ||
         (key.endsWith("/binding/parent") && ((value as KataSession).autoParent && !(value as KataSession).autoParentClosed || (value as KataSession).mainActive && !(value as KataSession).ended)))
       pinned.add(key.split("/")[1]!);
@@ -229,6 +231,24 @@ async function delegationParent($: EngineInterface, deadline?: number, captured?
       return s.parent;
     }
     if (s.autoDisabled || s.unbound) return s.parent;
+    if (s.promptRef) {
+      // The first prompt named the issue this session works under: use it as
+      // the parent instead of creating a claude-session issue. Outages retry.
+      const ref = s.promptRef;
+      try {
+        const view = await show($, ref, {...s, project: ref.split("#")[0], deadline}, timeoutMs);
+        if (view.issue.status !== "closed" && view.issue.metadata?.["claude.auto_parent"] !== true) {
+          s = {...s, parent: ref, project: ref.split("#")[0], promptRef: undefined, mainActive: true};
+          await persist(s);
+          return ref;
+        }
+        s = {...s, promptRef: undefined, promptRefNote: `first prompt named ${ref}, but it is ${view.issue.status === "closed" ? "closed" : "an automatic session issue"}`};
+      } catch (error) {
+        if (!definitelyMissing(error)) throw error;
+        s = {...s, promptRef: undefined, promptRefNote: `first prompt named ${ref}, but Kata has no such issue`};
+      }
+      await persist(s);
+    }
     let projectAvailable = false;
     try {
       const probe = await run($, ["list", "--limit", "1", "--json"], timeoutMs, {...s, deadline});
@@ -243,8 +263,10 @@ async function delegationParent($: EngineInterface, deadline?: number, captured?
     }
     const description = sessionDescription(s.firstPrompt ?? "", s.id, s.sessionName);
     if (s.firstPromptTitle) description.title = s.firstPromptTitle;
+    if (s.promptRefNote) description.body += `\n\nNamed issue not used: ${s.promptRefNote}.`;
     const d: IssueView = JSON.parse(await run($, ["create", description.title, "--body", description.body,
       "--label", "claude-session", "--meta", `claude.session_id=${s.id}`,
+      ...(s.promptRefNote ? ["--meta", `claude.binding_note=${s.promptRefNote}`] : []),
       "--meta", `claude.workspace=${s.cwd}`,
       "--idempotency-key", `claude-session:${s.id}`, "--force-new", "--json"], timeoutMs, {...s, deadline}));
     if (!d.issue?.short_id) throw new Error("No Kata session parent ref");
@@ -475,7 +497,7 @@ async function discoverParents($: EngineInterface) {
   for (const key of keys) if (/^session\/[^/]+\/(spawn|run)\//.test(key)) {
     if (key.startsWith(`session/${current.id}/`) && (current.parent || current.unbound)) continue;
     const child = await $.store.get(key) as KataEntry;
-    if (child.parent && child.workspace === current.cwd && compatibleScope(child.scope,scope)) {recoverable = true; break;}
+    if (child.parent && !child.bound && child.workspace === current.cwd && compatibleScope(child.scope,scope)) {recoverable = true; break;}
   }
   if (!recoverable) return;
   const result = JSON.parse(await run($, ["list", "--label", "claude-session", "--status", "open", "--limit", "1000", "--json"], 1000, current));
@@ -491,7 +513,10 @@ async function discoverParents($: EngineInterface) {
     }
     if (metadata?.["claude.workspace"] !== current.cwd) continue;
     const children: KataEntry[] = [];
-    for (const k of keys) if (k.startsWith(`session/${sid}/spawn/`) || k.startsWith(`session/${sid}/run/`)) children.push(await $.store.get(k) as KataEntry);
+    for (const k of keys) if (k.startsWith(`session/${sid}/spawn/`) || k.startsWith(`session/${sid}/run/`)) {
+      const child = await $.store.get(k) as KataEntry;
+      if (!child.bound) children.push(child);
+    }
     if (!children.length || children.some(c=>c.parent !== issue.qualified_id || c.workspace !== current.cwd || !compatibleScope(c.scope,scope))) continue;
     let generation = 0;
     for (const k of keys) if (k.startsWith(`session/${sid}/op/`)) {
@@ -747,6 +772,11 @@ async function apply($: EngineInterface, op: KataOperation, timeoutMs = 1000) {
         continue;
       await meta($, ref, key, value, op);
     }
+  } else if (op.kind === "deny" && entry.bound) {
+    // A bound issue predates this spawn: record the denial, never close it.
+    if (!d.comments?.some(c => c.body.includes(op.body!)))
+      await run($, ["comment", ref, "--body", op.body!, "--teammate", entry.teammate], timeoutMs, op);
+    await meta($, ref, "claude.status", "denied", op);
   } else if (op.kind === "deny") {
     await meta($, ref, "claude.status", "denied-close-pending", op);
     if (!d.labels?.some(l => l.label === "needs-review")) await run($, ["label", "add", ref, "needs-review"], timeoutMs, op);
@@ -765,16 +795,20 @@ async function apply($: EngineInterface, op: KataOperation, timeoutMs = 1000) {
     await putEntry($, op.entry, op.key, old => ({...old!, closedBy: "mod"}), op.sessionId);
     await reconcileParents($);
   } else {
+    const observed = entry.bound ? evidenceArgs(entry.evidence).filter(v => !v.startsWith("--")) : [];
     if (!d.comments?.some((c) => c.body.includes(op.marker!)))
       await run($, [
         "comment",
         ref,
         "--body",
-        op.body! + "\n\n" + op.marker,
+        op.body! + (observed.length ? "\n\nObserved verification: " + observed.join("; ") : "") + "\n\n" + op.marker,
         "--teammate",
         entry.teammate,
       ], timeoutMs, op);
-    if (op.status === "completed" && (op.entry === "run" ? entry.workflowCompletion?.verified && !entry.reply?.incomplete : canClose(entry.verification, op.body)) && entry.statusEffect === op.id) {
+    if (entry.bound) {
+      // The named issue belongs to the delegate (and its lead): it closes the
+      // issue itself with its own evidence. The mod reports, never closes.
+    } else if (op.status === "completed" && (op.entry === "run" ? entry.workflowCompletion?.verified && !entry.reply?.incomplete : canClose(entry.verification, op.body)) && entry.statusEffect === op.id) {
       const fresh = await show($, ref, op, timeoutMs);
       if (fresh.issue.status !== "closed" && fresh.labels?.some(l => l.label === "needs-review"))
         await run($, ["label", "rm", ref, "needs-review"], timeoutMs, op);
@@ -1204,6 +1238,28 @@ async function reconcileAgents($: EngineInterface) {
   }
 }
 
+/** Bind a spawn to the existing issue its description/prompt names (see
+ * refs.ts for the rule). The issue must exist, be open, not be this mod's
+ * automatic session issue, and not be tracking another running agent;
+ * otherwise a child is created as before and `note` says why. */
+async function spawnBinding($: EngineInterface, e: {description?: string; prompt: string}, context: KataSession, key: string, deadline: number): Promise<{ref?: string; note?: string}> {
+  if (context.unbound || context.autoDisabled || !compatibleScope(context.scope, await executionScope($))) return {};
+  const known = [context.parent, context.autoParent, context.promptRef].filter((r): r is string => !!r);
+  const named = namedIssue([e.description ?? "", e.prompt], known);
+  if (!named.ref) return {note: named.reason};
+  const project = named.ref.split("#")[0];
+  try {
+    const view = await show($, named.ref, {workspace: context.workspace ?? context.cwd, project, deadline}, 1000);
+    const m = view.issue.metadata ?? {}, ref = qualified(view, project);
+    if (view.issue.status === "closed") return {note: `named ${ref} is closed`};
+    if (ref === context.autoParent || m["claude.auto_parent"] === true) return {note: `named ${ref} is an automatic session issue`};
+    if (m["claude.status"] === "running" && typeof m["claude.tool_use_id"] === "string" && m["claude.tool_use_id"] !== key)
+      return {note: `named ${ref} already tracks running agent ${m["claude.tool_use_id"]}`};
+    return {ref};
+  } catch (error) {
+    return {note: definitelyMissing(error) ? `named ${named.ref} does not exist in Kata` : `could not verify named ${named.ref} (Kata unavailable)`};
+  }
+}
 async function launchWorkflow($: EngineInterface, value: unknown, captured?: KataSession) {
   if (!value || typeof value !== "object") return;
   const r = value as Record<string, unknown>;
@@ -1373,8 +1429,10 @@ export const register: Register = (on, options) => {
     if (["composer", "bridge", "sdk"].includes(e.origin.kind)) await safely($, async () => {
       await parentLock(async () => {
         const s = await session($);
+        const named = s.firstPrompt === undefined ? namedIssue([e.text]) : undefined;
         await bind($, { ...s, mainActive: true, ...(s.firstPrompt === undefined ? {firstPrompt: e.text.slice(0, 1500),
-          firstPromptTitle: e.text.trim() ? sessionDescription(e.text, s.id).title : undefined} : {}) });
+          firstPromptTitle: promptTitle(e.text) !== undefined ? sessionDescription(e.text, s.id).title : undefined,
+          promptRef: named?.ref, promptRefNote: named?.reason ? `first prompt: ${named.reason}` : undefined} : {}) });
       });
     });
     return next(e);
@@ -1391,6 +1449,19 @@ export const register: Register = (on, options) => {
       capturedSid = sid;
       if (!contractCache.get(sid)?.text) await refreshContract($,{id:sid,cwd:context.cwd},deadline,spawnCreateTimeoutMs);
       const teammate = await teammateHandle(e.name ?? e.subagentType, key);
+      const binding = await spawnBinding($, e, context, key, deadline);
+      if (binding.ref) {
+        const ref = binding.ref;
+        entry = await putEntry($, "spawn", key, old => old ?? {
+          parent: ref, ref, bound: true, project: ref.split("#")[0], scope: context.scope,
+          workspace: context.workspace ?? context.cwd, title: e.description || "Agent work",
+          teammate, toolId: key, status: "running", background: e.background,
+        }, sid, true);
+        if (entry.bound) await metadata($, "spawn", key, {
+          "claude.tool_use_id": key, "claude.agent_type": e.subagentType, "claude.session_id": sid,
+          "claude.teammate": teammate, "claude.status": "running",
+        }, "bind");
+      } else
       entry = await putEntry(
         $,
         "spawn",
@@ -1406,6 +1477,7 @@ export const register: Register = (on, options) => {
             toolId: key,
             status: "running",
             background: e.background,
+            bindingNote: binding.note,
           },
         sid, true,
       );
@@ -1431,6 +1503,7 @@ export const register: Register = (on, options) => {
         `claude.teammate=${teammate}`,
         "--meta",
         "claude.status=running",
+        ...(binding.note ? ["--meta", `claude.binding_note=${binding.note}`] : []),
       ];
       if (!entry.ref)
         await create($, {
@@ -1445,7 +1518,7 @@ export const register: Register = (on, options) => {
       if (sessionCache.get(sid)?.autoDisabled || sessionCache.get(sid)?.unbound) {entry = undefined; return;}
       const cached = contractCache.get(sid);
       if (cached?.text)
-        noted = {...e, prompt: cached.text + (entry?.ref ? `\n\nKata: your work is tracked as ${entry.ref} under ${entry.parent}. Use \`kata --teammate ${teammate}\` for any Kata command and do not create another issue for it. When you finish and have verified the work, close it yourself: \`kata --teammate ${teammate} close ${entry.ref} --done --message "<what you did and how you verified it>" --commit <sha> --test "<command>"\` (use only the evidence you actually have). If you could not verify it, do not close it; comment what remains.\n\n` : `\n\nKata tracking is pending recovery; use teammate ${teammate} and do not create another issue.\n\n`) + e.prompt};
+        noted = {...e, prompt: cached.text + (entry?.ref ? `\n\nKata: your work is tracked as ${entry.ref} ${entry.bound ? "(the issue named in your task; no child issue was created)" : "under " + entry.parent}. Use \`kata --teammate ${teammate}\` for any Kata command and do not create another issue for it. When you finish and have verified the work, close it yourself: \`kata --teammate ${teammate} close ${entry.ref} --done --message "<what you did and how you verified it>" --commit <sha> --test "<command>"\` (use only the evidence you actually have). If you could not verify it, do not close it; comment what remains.\n\n` : `\n\nKata tracking is pending recovery; use teammate ${teammate} and do not create another issue.\n\n`) + e.prompt};
 
     });
     const result = await next(noted);
@@ -1479,7 +1552,7 @@ export const register: Register = (on, options) => {
             entry: "spawn",
             key,
             body:
-              `Claude Code denied task "${entry!.title ?? e.description ?? "Agent work"}" (tool ${key}). The delegated agent did not start, so this child is cancelled. Reason: ${result.deny?.trim() || "No agent id was returned."}. [claude:${await $.session.id()}:${key}:deny]`,
+              `Claude Code denied task "${entry!.title ?? e.description ?? "Agent work"}" (tool ${key}). The delegated agent did not start, so ${entry!.bound ? "this issue is left as it was" : "this child is cancelled"}. Reason: ${result.deny?.trim() || "No agent id was returned."}. [claude:${await $.session.id()}:${key}:deny]`,
             attempts: 0,
           });
         }

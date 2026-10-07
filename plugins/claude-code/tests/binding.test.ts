@@ -17,7 +17,7 @@ test("first delegation creates labeled session parent from first prompt and type
   await h.clock.settle();
   const creates = h.calls.filter(a => a[1] === "create");
   expect(creates.length).toBe(2);
-  expect(creates[0]![2]).toBe("Claude session: " + ("Build example with tests " + "x".repeat(1600)).slice(0,70));
+  expect(creates[0]![2]).toBe("Claude session: Build example");
   expect(creates[0]).toContain("claude-session");
   expect(creates[0]).toContain("claude-session:s1");
   expect(creates[0]![creates[0]!.indexOf("--body") + 1]).toBe(("Build example\nwith tests " + "x".repeat(1600)).slice(0,1500) + "\n\nClaude session id: s1");
@@ -266,4 +266,55 @@ test("new entries and pending operations retain qualified ref and original works
  const h=harness(on,"fixture#root");on("agent.spawn",()=>({model:"sonnet",agentId:"a1"}));await $.session.start(start);await $.agent.spawn(spawn());await h.clock.settle();
  const entry=h.persisted.get("session/s1/spawn/tool-1") as {ref:string;project:string;workspace:string};expect(entry.ref).toBe("fixture#c1");expect(entry.project).toBe("fixture");expect(entry.workspace).toBe("/tmp/test");
  const ops=[...h.persisted.entries()].filter(([k])=>k.includes("/op/")).map(([,v])=>v as {project?:string;workspace?:string});expect(ops.every(o=>o.project==="fixture"&&o.workspace==="/tmp/test")).toBe(true);
+});
+
+const named = (h: ReturnType<typeof harness>, id: string, metadata: Record<string, string | boolean> = {}, status = "open") =>
+  h.issues.set(id, {issue: {short_id: id, status, revision: 1, metadata}, comments: [], labels: []});
+
+test("first prompt naming an existing issue parents delegates there and creates no session issue", async ($, on) => {
+  const h = harness(on, ""); named(h, "ab12");
+  on("agent.spawn", () => ({model: "sonnet", agentId: "a1"}));
+  await $.session.start(start);
+  await userPrompt($, "You own Kata issue fixture#ab12 (parent fixture#root). Ship the parser fix.");
+  await $.agent.spawn(spawn({prompt: "Write the parser tests", description: "Parser tests"}));
+  await h.clock.settle();
+  const creates = h.calls.filter(a => a[1] === "create");
+  expect(creates.length).toBe(1);
+  expect(creates[0]![creates[0]!.indexOf("--parent") + 1]).toBe("fixture#ab12");
+  expect(h.calls.some(a => a.includes("claude-session"))).toBe(false);
+  expect((await $.command.run(command())).text).toContain("Kata parent: fixture#ab12");
+});
+
+for (const [why, setup, note] of [
+  ["missing", (h: ReturnType<typeof harness>) => { h.control.missing = ["zz99"]; }, "first prompt named fixture#zz99, but Kata has no such issue"],
+  ["closed", (h: ReturnType<typeof harness>) => { named(h, "zz99", {}, "closed"); }, "first prompt named fixture#zz99, but it is closed"],
+] as const) test(`first prompt naming a ${why} issue falls back to a session issue that says why`, async ($, on) => {
+  const h = harness(on, ""); setup(h);
+  on("agent.spawn", () => ({model: "sonnet", agentId: "a1"}));
+  await $.session.start(start);
+  await userPrompt($, "Kata issue: fixture#zz99. Ship the parser fix.");
+  await $.agent.spawn(spawn());
+  await h.clock.settle();
+  const session = h.calls.find(a => a[1] === "create" && a.includes("claude-session"))!;
+  expect(session[2]).toBe("Claude session: Kata issue: fixture#zz99");
+  expect(session).toContain("claude.binding_note=" + note);
+  expect(session[session.indexOf("--body") + 1]).toContain("Named issue not used: " + note);
+});
+
+test("session issue title is a short whole-word summary and the body keeps the prompt", async ($, on) => {
+  const h = harness(on, ""); on("agent.spawn", () => ({model: "sonnet", agentId: "a1"}));
+  const prompt = "https://github.com/Orange-County-AI/herdr-mcp/releases/tag/v0.5.0 this has release tags now, we have a modified verison of this on umbrle with executor, we can now replace it with the offiical nad update our n8n flow for this.";
+  await $.session.start(start); await userPrompt($, prompt); await $.agent.spawn(spawn());
+  const session = h.calls.find(a => a[1] === "create" && a.includes("claude-session"))!;
+  expect(session[2]).toBe("Claude session: Herdr-mcp v0.5.0 this has release tags now");
+  expect(session[session.indexOf("--body") + 1]).toBe(prompt + "\n\nClaude session id: s1");
+});
+
+test("long first sentence is cut at a clause or word boundary, never mid-word", async ($, on) => {
+  const h = harness(on, ""); on("agent.spawn", () => ({model: "sonnet", agentId: "a1"}));
+  await $.session.start(start);
+  await userPrompt($, "Please can you refactor the evidence collector so that shell chains with heredocs are parsed once and cached");
+  await $.agent.spawn(spawn());
+  const title = h.calls.find(a => a[1] === "create" && a.includes("claude-session"))![2]!;
+  expect(title).toBe("Claude session: Refactor the evidence collector so that shell chains");
 });

@@ -9,6 +9,7 @@ These keys describe observed execution and plan state. `work.*` belongs to the c
 | `claude.workspace`, `omp.workspace`, `pi.workspace` | Pinned original workspace. |
 | `claude.tool_use_id`, `claude.agent_type`, `claude.teammate`, `claude.agent_id` | Delegated Agent attribution and native join. |
 | `claude.workflow_run_id`, `claude.task_id`, `claude.workflow_name`, `claude.workflow_remote` | Local/remote workflow run identity. |
+| `claude.binding_note` | Why a named issue was not bound (missing, closed, busy, ambiguous) on the fallback child or session parent. |
 | `claude.status` | Observed running, completed, failed, killed, denied, or session-ended state; a pending denied close can use `denied-close-pending`. |
 | `pi.subagent_id` | Child Pi session identity and task reservation. |
 | `omp.subagent_id`, `omp.parent_agent_id`, `omp.status` | OMP delegation identity and outcome. |

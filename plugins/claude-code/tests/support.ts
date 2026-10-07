@@ -72,6 +72,7 @@ export function harness(
     project: boolean;
     projectThrows: boolean;
     failEdit: number;
+    missing: string[];
     hints: string[];
     toasts: string[];
     logs: {text: string; to: string}[];
@@ -97,6 +98,7 @@ export function harness(
     project: true,
     projectThrows: false,
     failEdit: 0,
+    missing: [],
     hints: [],
     toasts: [],
     logs: [],
@@ -153,6 +155,8 @@ export function harness(
     if (verb === "audit") return output(JSON.stringify({rows:events.filter(e=>e.type==="issue.closed").map(e=>({issue:e.issue_short_id,event_id:e.event_id,reason:e.payload.reason}))}));
     if (verb === "events") {const after=Number(args[args.indexOf("--after")+1]??0);return output(JSON.stringify({events:events.filter(e=>e.event_id>after).slice(0,Number(args[args.indexOf("--limit")+1]??100)),reset_required:false}));}
     if (verb === "edit" && control.failEdit-- > 0) return output("", 1);
+    if (verb === "show" && control.missing.includes(args[2]!.split("#").pop()!))
+      return {...output("", 4), value: {...output("", 4).value, stderr: '{"error":{"kind":"not_found","code":"issue_not_found","message":"issue not found","exit_code":4}}'}};
     if (verb === "show" && control.showDelayMs)
       await clock.sleep(control.showDelayMs);
     if (verb === "create" && control.failCreate-- > 0) return output("", 1);
