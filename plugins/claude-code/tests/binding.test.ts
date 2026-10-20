@@ -1,7 +1,7 @@
 import { test, expect } from "claude-code/testing";
 import { harness, start, spawn, command, canonicalContract } from "./support.ts";
 import type { EngineCall } from "claude-code/testing";
-import { claimedRef, parseKata } from "../hooks/commands.ts";
+import { claimedRef, parseKata, reportedClaims } from "../hooks/commands.ts";
 
 const userPrompt = async ($: import("claude-code/testing").Engine, text: string) =>
   ($.prompt.submit as EngineCall<"prompt.submit">)({ text, wait: false, origin: { kind: "composer" } });
@@ -334,4 +334,12 @@ test("a plan the lead claims in a compound script is adopted and its children bi
   await h.clock.settle();
   expect(h.calls.some(a => a[1] === "create")).toBe(false);
   expect(h.calls.some(a => a.includes("claude-session"))).toBe(false);
+});
+
+test("compound claim output counts only the lead's own claims", () => {
+  const out = "OK claim gfzd\nkk4d assigned to vlad\nzz12 assigned to bob\n";
+  expect(reportedClaims("set -e\nkata claim $F --agent; kata claim $P", out)).toEqual(["gfzd", "kk4d", "zz12"]);
+  expect(reportedClaims("kata assign $X --to bob; kata claim $Y --agent", out)).toEqual(["gfzd"]);
+  expect(reportedClaims("kata claim $Y --as someone --agent; true", out)).toEqual([]);
+  expect(reportedClaims("echo done; ls", out)).toEqual([]);
 });

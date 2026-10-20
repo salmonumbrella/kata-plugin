@@ -284,9 +284,9 @@ async function claimedRoot($: EngineInterface, refs: string[]): Promise<string |
   for (const ref of refs.slice(0, 5)) {
     try { views.push({ref, view: await show($, ref)}); } catch { /* An unreadable claim is not adopted. */ }
   }
-  const claimed = new Set(views.flatMap(({view}) => [view.issue.qualified_id, view.issue.short_id]));
+  const claimed = new Set(views.map(({view}) => view.issue.short_id));
   const open = views.filter(({view}) => view.issue.status === "open");
-  return (open.find(({view}) => !view.parent?.qualified_id || !claimed.has(view.parent.qualified_id)) ?? open[0])?.ref;
+  return (open.find(({view}) => !view.parent?.short_id || !claimed.has(view.parent.short_id)) ?? open[0])?.ref;
 }
 async function adoptParent($: EngineInterface, ref: string, workspace?: string) {
   return parentLock(async () => {
@@ -429,7 +429,7 @@ type IssueView = {
   event?: {project_name?: string};
   issue: { qualified_id?: string; short_id: string; uid?: string; status: string; revision: number; closed_at?: string; closed_reason?: string; metadata?: Record<string, unknown> };
   children?: IssueView["issue"][];
-  parent?: { qualified_id?: string } | null;
+  parent?: { qualified_id?: string; short_id?: string } | null;
   comments?: { body: string }[];
   labels?: { label: string }[];
 };

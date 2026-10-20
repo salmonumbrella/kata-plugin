@@ -176,7 +176,7 @@ export function harness(
     if (verb === "show")
       return output(
         JSON.stringify(
-          (issues.get(args[2]!) ? {...issues.get(args[2]!)!, parent: issues.get(args[2]!)!.parent ? {qualified_id: issues.get(args[2]!)!.parent} : null, labels: issues.get(args[2]!)!.labels.map(label => ({label})), children: [...issues.values()].filter(d => d.parent === qualify(args[2]!)).map(d => ({...d.issue,qualified_id:qualify(d.issue.short_id,d.parent?.split("#")[0] ?? "fixture")}))} : undefined) ?? {
+          (issues.get(args[2]!) ? {...issues.get(args[2]!)!, parent: issues.get(args[2]!)!.parent ? {qualified_id: issues.get(args[2]!)!.parent, short_id: issues.get(args[2]!)!.parent!.split("#").pop()} : null, labels: issues.get(args[2]!)!.labels.map(label => ({label})), children: [...issues.values()].filter(d => d.parent === qualify(args[2]!)).map(d => ({...d.issue,qualified_id:qualify(d.issue.short_id,d.parent?.split("#")[0] ?? "fixture")}))} : undefined) ?? {
             issue: {
               short_id: args[2]!.split("#").pop(),
               status: "open",
