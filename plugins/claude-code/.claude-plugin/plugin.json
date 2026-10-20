@@ -1,6 +1,6 @@
 {
   "name": "kata",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Record Claude Code delegated agent work as attributed Kata child issues.",
   "author": {
     "name": "salmonumbrella"
