@@ -278,14 +278,17 @@ async function delegationParent($: EngineInterface, deadline?: number, captured?
     return s.parent;
   });
 }
-/** The claimed issue whose parent was not also claimed (the plan root). */
+/** The claimed issue whose parent was not also claimed (the plan root). Only
+ * issues the lead now owns count: output lines alone do not prove a claim. */
 async function claimedRoot($: EngineInterface, refs: string[]): Promise<string | undefined> {
+  if (!refs.length) return;
+  const me = JSON.parse(await run($, ["whoami", "--json"])).actor;
   const views: {ref: string; view: IssueView}[] = [];
   for (const ref of refs.slice(0, 5)) {
     try { views.push({ref, view: await show($, ref)}); } catch { /* An unreadable claim is not adopted. */ }
   }
   const claimed = new Set(views.map(({view}) => view.issue.short_id));
-  const open = views.filter(({view}) => view.issue.status === "open");
+  const open = views.filter(({view}) => view.issue.status === "open" && !!me && view.issue.owner === me);
   return (open.find(({view}) => !view.parent?.short_id || !claimed.has(view.parent.short_id)) ?? open[0])?.ref;
 }
 async function adoptParent($: EngineInterface, ref: string, workspace?: string) {
@@ -427,7 +430,7 @@ async function restore($: EngineInterface) {
 
 type IssueView = {
   event?: {project_name?: string};
-  issue: { qualified_id?: string; short_id: string; uid?: string; status: string; revision: number; closed_at?: string; closed_reason?: string; metadata?: Record<string, unknown> };
+  issue: { qualified_id?: string; short_id: string; owner?: string; uid?: string; status: string; revision: number; closed_at?: string; closed_reason?: string; metadata?: Record<string, unknown> };
   children?: IssueView["issue"][];
   parent?: { qualified_id?: string; short_id?: string } | null;
   comments?: { body: string }[];

@@ -35,7 +35,7 @@ const rerunSpec = "# Target\nCreate `tests/__init__.py` (empty file) and `tests/
 test("a long delegation spec binds by its task name", () => {
   expect(matchDelegation(rerun, rerunSpec, { label: "WriteTests" })?.ref).toBe("r#t3st");
   expect(matchDelegation(rerun, rerunSpec, { label: "RunUnittest" })?.ref).toBe("r#rvn2");
-  expect(matchDelegation(rerun, rerunSpec)?.ref).toBeUndefined(); // too close to call without the name
+  expect(matchDelegation(rerun, rerunSpec)?.ref).toBe("r#t3st"); // without a name, the task marked for delegation
 });
 
 test("exact titles, qualified refs and bare short ids bind directly", () => {
@@ -57,6 +57,29 @@ test("a named task that is taken binds nothing else", () => {
   expect(pick(plan, 'Complete "Write widget tests"')).toBeUndefined();
   expect(pick(plan, "continue task aa11 and write the widget test docs")).toBeUndefined();
   expect(pick([task("y#cc33", "Write gadget tests"), task("y#dd44", "Write gadget test docs")], 'Complete "Write gadget tests"', ["y#cc33"])).toBeUndefined();
+});
+
+test("a short id only counts as a whole word after a marker", () => {
+  const plan = [task("m#resh", "Implement cache"), task("m#erjg", "Write cache tests")];
+  expect(namedTask(plan, "refresh the cache")).toBeUndefined();
+  expect(namedTask(plan, "see other#erjg first")).toBeUndefined();
+  expect(namedTask(plan, "this is kata issue erjg")?.ref).toBe("m#erjg");
+  expect(namedTask(plan, "work on #erjg")?.ref).toBe("m#erjg");
+});
+
+// The 2026-10-20 third run: a short spec that also says "then run python3 -m
+// unittest", with the plan task marked for delegation.
+test("the one task marked for delegation takes a single related delegation", () => {
+  const plan = [
+    task("d#4mpk", "Implement word_count and top_words in textstats/__init__.py", "in_progress"),
+    task("d#t3st", "Delegate unittest suite for word_count/top_words (incl. empty input) to subagent"),
+    task("d#rvn2", "Run python3 -m unittest and fix any failures"),
+    task("d#cm7t", "Commit work and summarize"),
+  ];
+  const spec = "Write tests/test_textstats.py unittest suite for textstats.word_count and textstats.top_words per the contract, then run python3 -m unittest and report results.";
+  expect(matchDelegation(plan, spec, { label: "TestWriter" })?.ref).toBe("d#t3st");
+  expect(matchDelegation(plan, "Reply with exactly: SUBAGENT-OK")).toBeUndefined();
+  expect(matchDelegation(plan, spec, { label: "TestWriter", single: false })?.ref).not.toBe("d#4mpk");
 });
 
 test("the active task is a fallback only for an explicit current-task handoff", () => {

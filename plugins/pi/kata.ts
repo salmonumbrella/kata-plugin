@@ -27,9 +27,10 @@ export function inheritsModel(argv: string[]): { model: boolean; thinking: boole
 
 const TEAMMATE = /^[a-z0-9][a-z0-9._-]{0,63}$/;
 // A command that runs pi (by name or path) in command position, after any
-// env/nohup-style prefixes and assignments, may launch a child that needs the
-// lead's parent. Arguments such as `grep pi` or `which pi` do not.
-const PI_LAUNCH = /(?:^|[;&|(`\n]|\$\()\s*(?:(?:env|nohup|exec|command|time|setsid|caffeinate)\s+|[A-Za-z_][A-Za-z0-9_]*=(?:'[^']*'|"[^"]*"|[^\s;&|]*)\s+)*(?:[^\s;&|()'"`]*\/)?pi(?=$|[\s;&|)])/;
+// env/nohup-style prefixes and assignments, or at the start of a quoted script
+// (`bash -c "pi -p ..."`), may launch a child that needs the lead's parent.
+// Arguments such as `grep pi` or `which pi` do not.
+const PI_LAUNCH = /(?:^|[;&|(`\n'"]|\$\()\s*(?:(?:env|nohup|exec|command|time|setsid|caffeinate)\s+|[A-Za-z_][A-Za-z0-9_]*=(?:'[^']*'|"[^"]*"|[^\s;&|]*)\s+)*(?:[^\s;&|()'"`]*\/)?pi(?=$|[\s;&|)])/;
 export const launchesPi = (command: string) => PI_LAUNCH.test(command);
 
 // The native adapter reuses this exact baseline on session_start. Preseed it

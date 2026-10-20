@@ -324,9 +324,11 @@ test("long first sentence is cut at a clause or word boundary, never mid-word", 
 test("a plan the lead claims in a compound script is adopted and its children bind spawns", async ($, on) => {
   const h = harness(on, "");
   for (const [id, parent] of [["kk4d", undefined], ["gfzd", "fixture#kk4d"], ["erjg", "fixture#kk4d"]] as const)
-    h.issues.set(id, {issue: {short_id: id, qualified_id: `fixture#${id}`, status: "open", revision: 1, metadata: {}}, parent, comments: [], labels: []} as any);
+    h.issues.set(id, {issue: {short_id: id, qualified_id: `fixture#${id}`, status: "open", revision: 1, owner: "actor", metadata: {}}, parent, comments: [], labels: []} as any);
+  h.issues.set("zz12", {issue: {short_id: "zz12", qualified_id: "fixture#zz12", status: "open", revision: 1, owner: "bob", metadata: {}}, comments: [], labels: []} as any);
   on("agent.spawn", () => ({model: "sonnet", agentId: "a1"}));
-  on("tool.call", {tool: "Bash"}, () => ({result: {}, text: "P=kk4d F=gfzd T=erjg\nOK claim gfzd\nIssue: gfzd \"Implement\"\nOK claim kk4d\nIssue: kk4d \"Plan\""}));
+  // zz12 only appears in the output; the lead does not own it, so it is not adopted.
+  on("tool.call", {tool: "Bash"}, () => ({result: {}, text: "zz12 assigned to bob\nP=kk4d F=gfzd T=erjg\nOK claim gfzd\nIssue: gfzd \"Implement\"\nOK claim kk4d\nIssue: kk4d \"Plan\""}));
   await $.session.start(start);
   await claim($, "set -e\nP=$(kata create plan --json | jq -r .issue.short_id)\nkata claim $F --agent; kata claim $P --agent");
   expect((await $.command.run(command())).text).toContain("fixture#kk4d");

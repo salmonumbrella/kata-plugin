@@ -173,16 +173,18 @@ export function namedTask(tasks: Task[], text: string): Task | undefined {
 		return title.trim().split(/\s+/).length >= 3 && new RegExp(`(?<![\\w])${phrase}(?![\\w])`, "i").test(text);
 	};
 	const named = tasks.filter(t => OPEN.has(t.status) && (titled(t.content) || text.includes(t.ref) ||
-		new RegExp(`(?:\\b(?:issue|kata|ref|task)\\s*[:=]?\\s*|#)${escape(t.ref.split("#").pop()!)}(?![\\w-])`, "i").test(text)));
+		new RegExp(`(?:\\b(?:issue|kata|ref|task)\\b\\s*[:=]?\\s*|(?<![\\w.-])#)${escape(t.ref.split("#").pop()!)}(?![\\w-])`, "i").test(text)));
 	const longest = named.sort((a, b) => b.content.length - a.content.length)[0];
 	if (longest && named.every(t => t === longest || longest.content.toLowerCase().includes(t.content.toLowerCase()))) return longest;
 }
 
 export type MatchOptions = { unavailable?: ReadonlySet<string>; single?: boolean; label?: string };
 // Pick the plan task a delegation serves. A named task wins, and a named task
-// that is taken binds nothing else. Otherwise a clear weighted token overlap
-// wins, with the task's leading word counted twice, scored first for the short
-// label (omp's task name) and then the full text. The lead's active task scores
+// that is taken binds nothing else. Then a clear weighted token overlap with
+// the short label (omp's task name) wins; then, for a single delegation, the one
+// open task the lead marked for delegation ("... (delegated to subagent)") if it
+// shares a word with the spawn; then a clear overlap with the full text. Overlap
+// counts the task's leading word twice. The lead's active task scores
 // at half weight and is the fallback only for an explicit current-task handoff.
 export function matchDelegation(tasks: Task[], text: string, { unavailable = new Set(), single = true, label = "" }: MatchOptions = {}): Task | undefined {
 	const available = (t: Task) => OPEN.has(t.status) && t.status !== "blocked" && !t.delegated && !unavailable.has(t.ref);
@@ -206,7 +208,12 @@ export function matchDelegation(tasks: Task[], text: string, { unavailable = new
 		const [best, runner] = scored;
 		return best?.eligible && (!runner || best.score >= runner.score * 1.5) ? best.task : undefined;
 	};
-	const found = (label && overlap(label)) || overlap(full);
+	const byLabel = label && overlap(label);
+	if (byLabel) return byLabel;
+	const wanted = new Set(taskTokens(full));
+	const marked = candidates.filter(t => /\b(?:delegat\w*|sub-?agents?)\b/i.test(t.content));
+	if (single && marked.length === 1 && taskTokens(marked[0].content).some(token => wanted.has(token))) return marked[0];
+	const found = overlap(full);
 	if (found) return found;
 	const active = candidates.filter(t => t.status === "in_progress");
 	if (single && active.length === 1 && /\b(?:current|active|this)\s+(?:task|todo|item|step)\b/i.test(full)) return active[0];

@@ -154,6 +154,7 @@ export function harness(
       : [{qualified_id: "fixture#fixture"}]})) : {...output("", 1), value: {...output("", 1).value, stderr: "no project"}};
     if (verb === "audit") return output(JSON.stringify({rows:events.filter(e=>e.type==="issue.closed").map(e=>({issue:e.issue_short_id,event_id:e.event_id,reason:e.payload.reason}))}));
     if (verb === "events") {const after=Number(args[args.indexOf("--after")+1]??0);return output(JSON.stringify({events:events.filter(e=>e.event_id>after).slice(0,Number(args[args.indexOf("--limit")+1]??100)),reset_required:false}));}
+    if (verb === "whoami") return output(JSON.stringify({actor: "actor", source: "env"}));
     if (verb === "edit" && control.failEdit-- > 0) return output("", 1);
     if (verb === "show" && control.missing.includes(args[2]!.split("#").pop()!))
       return {...output("", 4), value: {...output("", 4).value, stderr: '{"error":{"kind":"not_found","code":"issue_not_found","message":"issue not found","exit_code":4}}'}};
