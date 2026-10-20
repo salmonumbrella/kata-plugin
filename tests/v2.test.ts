@@ -456,3 +456,46 @@ test("queued close survives extension recreation and retries only after its dead
     expect((await kata(["audit", "closes", "--json"])).rows.filter((r: any) => r.issue === parent.split("#")[1])).toHaveLength(1);
   } finally { Date.now = now; }
 });
+
+// The 2026-10-19 eval: omp sent todo init and the tests delegation in one batch.
+const evalPlan = ["Implement word_count and top_words in textstats", "Write unittest suite covering word_count, top_words, and empty input", "Run the suite with python3 -m unittest", "Commit the work"];
+test("a delegation spawned in the same batch as todo init binds its plan task", async () => {
+  const app = host(); await app.event("session_start");
+  const hook = app.event("tool_call", { toolName: "task", toolCallId: "eval-batch", input: { context: "Add word_count and top_words to textstats.",
+    tasks: [{ name: "WriteTests", agent: "task", task: "Write the textstats unittest suite in tests/ per the contract above" }] } });
+  const ref = await app.init(evalPlan);
+  await hook;
+  app.emit("task:subagent:lifecycle", { id: "WriteTests", agent: "task", status: "started", sessionFile: `${scratch}/eval-batch.jsonl`, parentToolCallId: "eval-batch", index: 0 });
+  await app.call({ op: "view" });
+  let children = (await show(ref)).children;
+  expect(children).toHaveLength(4);
+  expect(children.find((c: any) => c.title === evalPlan[1]).metadata["omp.subagent_id"]).toBe("WriteTests");
+  expect(children.find((c: any) => c.title === evalPlan[0]).metadata["omp.subagent_id"]).toBeUndefined();
+  // The delegated task never occupies the lead's slot: finishing its own task starts the next one.
+  expect((await app.call({ op: "done", task: evalPlan[0], message, evidence })).isError).toBeUndefined();
+  children = (await show(ref)).children;
+  expect(children.find((c: any) => c.title === evalPlan[2]).metadata["todo.status"]).toBe("in_progress");
+});
+
+test("an unrelated delegation never takes the lead's active task", async () => {
+  const app = host(); await app.event("session_start");
+  const ref = await app.init(["Implement widget", "Write widget tests"]);
+  await app.event("tool_call", { toolName: "task", toolCallId: "probe", input: { task: "Reply with exactly: SUBAGENT-OK" } });
+  app.emit("task:subagent:lifecycle", { id: "probe-agent", status: "started", sessionFile: `${scratch}/probe-agent.jsonl`, parentToolCallId: "probe", index: 0 });
+  await app.call({ op: "view" });
+  const children = (await show(ref)).children;
+  expect(children).toHaveLength(3);
+  expect(children.find((c: any) => c.title === "Implement widget").metadata["omp.subagent_id"]).toBeUndefined();
+  expect(children.find((c: any) => c.metadata?.["omp.subagent_id"] === "probe-agent").title).toBe("Subagent probe-agent");
+});
+
+test("delegate teammates differ across sessions that reuse an agent name", async () => {
+  const teammates: string[] = [];
+  for (const n of [1, 2]) {
+    const app = host(); await app.event("session_start"); const ref = await app.init([`Reused agent name ${n}`]);
+    app.emit("task:subagent:lifecycle", { id: "WriteTests", status: "started", sessionFile: `${scratch}/reused-name-${n}.jsonl` });
+    await app.call({ op: "view" });
+    teammates.push((await show(ref)).children.find((c: any) => c.metadata?.["omp.subagent_id"] === "WriteTests").metadata.teammate);
+  }
+  expect(teammates[0]).not.toBe(teammates[1]);
+});

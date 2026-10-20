@@ -113,9 +113,10 @@ export function shellOptions(words: ShellWord[]) {
 }
 
 
-export function teammateFor(id: string): string {
+// The salt (a session id) keeps reused agent names distinct across sessions.
+export function teammateFor(id: string, salt?: string): string {
 	const base = id.toLowerCase().replace(/[^a-z0-9._-]/g, "-").replace(/^[^a-z0-9]+/, "") || "agent";
-	return `${base.slice(0, 57)}-${digest(id).slice(0, 6)}`;
+	return `${base.slice(0, 57)}-${digest(salt ? `${salt}:${id}` : id).slice(0, 6)}`;
 }
 
 export function delegateCommand(command: string, executable: string, teammate: string, binding?: Binding): string {
@@ -138,6 +139,49 @@ export function delegateCommand(command: string, executable: string, teammate: s
 export function delegateContext(executable: string, id: string, ref: string, teammate: string, binding: Binding): string {
 	const command = `${quote(executable)} --workspace ${quote(binding.workspace)} --project ${quote(binding.parent.split("#")[0])} --teammate ${quote(teammate)}`;
 	return `You are subagent ${id}. Your Kata issue is ${ref}; your teammate is ${teammate}. Keep the existing actor and use this issue instead of inherited KATA_REF. Track attention on your own issue. When verified, YOU must run: ${command} close ${quote(ref)} --done --message '<describe this task and its verification in at least 40 characters>' --evidence '<typed evidence for your actual verification>'. If unfinished, leave it open and explain what remains.`;
+}
+
+const STOPWORDS = new Set(["a", "an", "and", "are", "as", "at", "be", "by", "do", "for", "from", "in", "into", "is", "it", "its", "of", "on", "or", "per", "the", "then", "this", "that", "to", "with", "you", "your", "above", "below", "all", "any", "please", "task", "plan", "subagent", "agent", "current", "complete", "finish"]);
+// Lowercase words with camelCase split and simple suffixes stripped; snake_case
+// identifiers stay whole because they usually name the code under change.
+export function taskTokens(text: string): string[] {
+	const words = text.replace(/([a-z0-9])([A-Z])/g, "$1 $2").toLowerCase().split(/[^a-z0-9_]+/);
+	const tokens: string[] = [];
+	for (let word of words) {
+		word = word.replace(/^_+|_+$/g, "");
+		if (word.length < 2 || STOPWORDS.has(word)) continue;
+		if (word.length > 5 && word.endsWith("ing")) word = word.slice(0, -3);
+		else if (word.length > 4 && word.endsWith("ed")) word = word.slice(0, -2);
+		else if (word.length > 3 && word.endsWith("s") && !word.endsWith("ss")) word = word.slice(0, -1);
+		if (STOPWORDS.has(word)) continue;
+		tokens.push(word);
+		if (word.length > 4 && word.endsWith("test")) tokens.push("test"); // unittest, pytest
+	}
+	return [...new Set(tokens)];
+}
+
+// Pick the plan task a delegation serves. An exact title or ref wins; otherwise
+// a clear weighted token overlap does, with the task's leading verb counted
+// twice. The lead's active task scores at half weight, and is the fallback only
+// when the delegation explicitly hands over the current task.
+export function matchDelegation(tasks: Task[], text: string, unavailable: ReadonlySet<string> = new Set(), single = true): Task | undefined {
+	const candidates = tasks.filter(t => OPEN.has(t.status) && t.status !== "blocked" && !t.delegated && !unavailable.has(t.ref));
+	const words = new Set(text.split(/[^A-Za-z0-9#_-]+/));
+	const named = candidates.filter(t => text.includes(t.content) || text.includes(t.ref) || words.has(t.ref.split("#").pop()!));
+	if (named.length === 1) return named[0];
+	if (named.length > 1) return;
+	const wanted = new Set(taskTokens(text)), open = tasks.filter(t => OPEN.has(t.status)).map(t => taskTokens(t.content));
+	const weight = (token: string) => Math.log((open.length + 1) / Math.max(1, open.filter(tokens => tokens.includes(token)).length));
+	const scored = candidates.map(task => {
+		const own = taskTokens(task.content), shared = own.filter(token => wanted.has(token));
+		const total = own.reduce((sum, token) => sum + weight(token), 0), overlap = shared.reduce((sum, token) => sum + weight(token), 0);
+		const score = (overlap + (own[0] && wanted.has(own[0]) ? weight(own[0]) : 0)) * (task.status === "in_progress" ? 0.5 : 1);
+		return { task, score, eligible: shared.length >= 2 && total > 0 && overlap / total >= 0.3 };
+	}).sort((a, b) => b.score - a.score);
+	const [best, runner] = scored;
+	if (best?.eligible && (!runner || best.score >= runner.score * 1.5)) return best.task;
+	const active = candidates.filter(t => t.status === "in_progress");
+	if (single && active.length === 1 && /\b(?:current|active|this)\s+(?:task|todo|item|step)\b/i.test(text)) return active[0];
 }
 
 export function phasesOf(tasks: Task[]): { name: string; tasks: Task[] }[] {
@@ -512,8 +556,10 @@ export function createKataCore(host: CoreHost, options: CoreOptions) {
 
 	// With no active task, start the earliest pending one (phase order).
 	async function advance(cwd: string): Promise<void> {
-		if (plan.tasks.some(t => t.status === "in_progress")) return;
-		const next = phasesOf(plan.tasks).flatMap(p => p.tasks).find(t => t.status === "pending");
+		// A delegated task is the subagent's; it never occupies the lead's slot.
+		const own = (t: Task) => !t.delegated && !host.isDelegated?.(t.ref);
+		if (plan.tasks.some(t => t.status === "in_progress" && own(t))) return;
+		const next = phasesOf(plan.tasks).flatMap(p => p.tasks).find(t => t.status === "pending" && own(t));
 		if (next) await transition(next, "in_progress", {}, cwd);
 	}
 
@@ -524,7 +570,7 @@ export function createKataCore(host: CoreHost, options: CoreOptions) {
 			return tasks;
 		}
 		if (!target) {
-			const active = plan.tasks.find(t => t.status === "in_progress");
+			const active = plan.tasks.find(t => t.status === "in_progress" && !t.delegated && !host.isDelegated?.(t.ref));
 			if (fallback === "active" && active) return [active];
 			throw new Error("Name the task (verbatim content or Kata ref).");
 		}
@@ -717,7 +763,7 @@ export function createKataCore(host: CoreHost, options: CoreOptions) {
 				const [task] = resolve(params.task, undefined, "none");
 				if (!OPEN.has(task.status)) await reopenParent();
 				if (task.status === "blocked") throw new Error(`"${task.content}" is blocked; unblock it first.`);
-				for (const other of plan.tasks) if (other !== task && other.status === "in_progress") await transition(other, "pending", {}, cwd);
+				for (const other of plan.tasks) if (other !== task && other.status === "in_progress" && !other.delegated && !host.isDelegated?.(other.ref)) await transition(other, "pending", {}, cwd);
 				await transition(task, "in_progress", change, cwd);
 				break;
 			}

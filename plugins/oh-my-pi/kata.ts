@@ -12,7 +12,7 @@
 // participate in parent closure. Unbound folders use a session-local plan.
 
 import path from "node:path";
-import { createKataCore, DESCRIPTION, OPEN, sessionKey, render,
+import { createKataCore, DESCRIPTION, OPEN, sessionKey, render, matchDelegation,
 	kataCommands as parseKataCommands, teammateFor, delegateCommand, delegateContext, type Binding } from "./kata-core";
 
 const EXECUTABLE = process.env.KATA_OMP_EXECUTABLE || "kata";
@@ -21,7 +21,7 @@ export const kataCommands = (command: string) => parseKataCommands(command, EXEC
 
 type Delegate = {
 	id: string; teammate: string; sessionFile?: string; parentAgentId?: string;
-	state: string; planRef?: string; ref?: string; binding?: Binding; ready?: Promise<void>; reported?: string;
+	state: string; planRef?: string; text?: string; single?: boolean; ref?: string; binding?: Binding; ready?: Promise<void>; reported?: string;
 	coordinator: Coordinator;
 };
 type Coordinator = {
@@ -38,7 +38,8 @@ export default function ompKata(pi: any) {
 	const main = (ctx: any) => ctx?.agent?.kind === "main";
 	let attentionSession: { id: string; cwd: string; ref?: string } | undefined;
 	let coordinator: Coordinator | undefined;
-	const assignments = new Map<string, (string | undefined)[]>();
+	// Spawn text per task tool call; refs once a plan existed when it was seen.
+	const assignments = new Map<string, { texts: string[]; refs?: (string | undefined)[] }>();
 	const core = createKataCore({
 		exec: (...args) => pi.exec(...args),
 		appendEntry: (...args) => pi.appendEntry(...args),
@@ -103,6 +104,12 @@ export default function ompKata(pi: any) {
 				if (!core.plan.parent || core.plan.local) return;
 				const binding: Binding = { parent: core.plan.parent, workspace: core.plan.workspace!, sessionId: id, auto: core.plan.auto };
 				record.binding = binding;
+				// todo init and task often share one batch, so the plan may not have
+				// existed when the task call was seen. Match against it now.
+				if (!record.planRef && record.text?.trim()) {
+					await load(binding.workspace);
+					record.planRef = matchDelegation(core.plan.tasks, record.text, reserved(record), record.single)?.ref;
+				}
 				if (record.planRef) {
 					const ref = record.planRef;
 					let issue = JSON.parse(await kata(["show", ref, "--json"], binding.workspace)).issue;
@@ -161,6 +168,12 @@ export default function ompKata(pi: any) {
 		}
 	}
 
+	function reserved(except?: Delegate): Set<string> {
+		const refs = [...assignments.values()].flatMap(a => a.refs ?? []);
+		for (const record of coordinator?.records.values() ?? []) if (record !== except) refs.push(record.ref || record.planRef);
+		return new Set(refs.filter((ref): ref is string => !!ref));
+	}
+
 	function prepare(record: Delegate) {
 		if (record.ref || record.ready) return record.ready;
 		record.ready = record.coordinator.prepare(record).catch(debug).finally(() => { record.ready = undefined; });
@@ -180,7 +193,9 @@ export default function ompKata(pi: any) {
 		let record = owner.records.get(event.id);
 		if (event.status === "started") {
 			if (!record) {
-				record = { id: event.id, planRef: main(core.currentCtx) ? assignments.get(event.parentToolCallId)?.[event.index ?? 0] : undefined, teammate: teammateFor(event.id), parentAgentId: core.currentCtx.agent?.id, sessionFile: event.sessionFile, state: "started", coordinator: owner };
+				const assignment = main(core.currentCtx) ? assignments.get(event.parentToolCallId) : undefined;
+				const text = [assignment?.texts[event.index ?? 0], event.description].filter(Boolean).join("\n");
+				record = { id: event.id, planRef: assignment?.refs?.[event.index ?? 0], text, single: (assignment?.texts.length ?? 1) === 1, teammate: teammateFor(event.id, owner.id), parentAgentId: core.currentCtx.agent?.id, sessionFile: event.sessionFile, state: "started", coordinator: owner };
 				owner.records.set(event.id, record);
 			}
 			record.state = "started";
@@ -200,22 +215,22 @@ export default function ompKata(pi: any) {
 		// Keep the session coordinator attached to the actual main context.
 		if (main(ctx) || !core.currentCtx || !main(core.currentCtx)) core.currentCtx = ctx;
 		if (main(ctx) && event.toolName === "task" && event.toolCallId) {
+			const items: any[] = Array.isArray(event.input?.tasks) ? event.input.tasks : [event.input];
+			const texts = items.map(item => [item?.name, item?.task, item?.description].filter(value => typeof value === "string").join("\n"));
+			const assignment: { texts: string[]; refs?: (string | undefined)[] } = { texts };
+			assignments.set(event.toolCallId, assignment);
 			return serial(async () => {
 				if (!core.plan.parent || core.plan.local) return;
 				await load(core.plan.workspace!);
-				const reserved = new Set([...assignments.values()].flat().filter(Boolean));
-				const items = Array.isArray(event.input?.tasks) ? event.input.tasks : [event.input];
-				const refs = items.map((item: any) => {
-					const text = `${item?.task || ""}\n${item?.name || ""}`;
+				const taken = reserved();
+				assignment.refs = texts.map(text => {
 					const named = core.plan.tasks.filter(task => OPEN.has(task.status) && (text.includes(task.content) || text.includes(task.ref)));
-					const active = core.plan.tasks.filter(task => task.status === "in_progress" && !reserved.has(task.ref));
-					const selected = named.length === 1 ? named[0] : named.length === 0 && items.length === 1 && active.length === 1 ? active[0] : undefined;
-					if (selected && reserved.has(selected.ref)) throw new Error(`Plan task ${selected.ref} is already delegated.`);
-					if (selected) reserved.add(selected.ref);
+					if (named.length === 1 && (taken.has(named[0].ref) || named[0].delegated)) throw new Error(`Plan task ${named[0].ref} is already delegated.`);
+					const selected = matchDelegation(core.plan.tasks, text, taken, texts.length === 1);
+					if (selected) taken.add(selected.ref);
 					return selected?.ref;
 				});
-				assignments.set(event.toolCallId, refs);
-			}).catch(error => ({ block: true, reason: String(error) }));
+			}).catch(error => { assignments.delete(event.toolCallId); return { block: true, reason: String(error) }; });
 		}
 		if (ctx.agent?.kind !== "sub" || event.toolName !== "bash" || typeof event.input?.command !== "string") return;
 		const commands = kataCommands(event.input.command);
