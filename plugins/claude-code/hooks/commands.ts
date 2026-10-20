@@ -69,6 +69,17 @@ export function claimedRef(args: readonly string[]): string | undefined {
   if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(project)) return;
   return `${project}#${ref}`;
 }
+/** Refs a successful compound script reports claiming. `kata claim $P` cannot
+ * be resolved lexically, so read Kata's own claim lines from the output. */
+export function reportedClaims(command: string, output: string): string[] {
+  if (!/\bkata\b[^\n]*\bclaim\b/.test(command)) return [];
+  const refs: string[] = [];
+  for (const match of output.matchAll(/^(?:OK claim (\S+)|(\S+) assigned to \S+)\s*$/gm)) {
+    const ref = match[1] ?? match[2]!;
+    if (/^[A-Za-z0-9][A-Za-z0-9._#-]*$/.test(ref) && !refs.includes(ref)) refs.push(ref);
+  }
+  return refs;
+}
 export function shellQuote(value: string): string {
   return "'" + value.replace(/'/g, "'\"'\"'") + "'";
 }
