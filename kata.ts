@@ -50,7 +50,7 @@ export default function ompKata(pi: any) {
 		delegatedRunning: () => [...(coordinator?.records.values() ?? [])].some(record => record.state === "started" || !record.ref || record.ready) ||
 			(core.currentCtx?.getAsyncJobSnapshot?.()?.running ?? []).some((job: any) => job.type === "task"),
 	}, { namespace: "omp", executable: EXECUTABLE, debugFile: process.env.KATA_OMP_DEBUG });
-	const { serial, bounded, debug, kata, actor, owned, work, load, bind, ensureParent, reconcile } = core;
+	const { serial, bounded, debug, kata, actor, owned, load, bind, ensureParent, reconcile } = core;
 	const warm = (ctx: any) => core.warm(ctx, self(ctx)?.binding?.workspace || ctx.cwd);
 	pi.registerTool({
 		name: "todo",
@@ -276,22 +276,15 @@ export default function ompKata(pi: any) {
 
 	// --------------------------------------------------------------- attention
 
-	async function attention(mode: "start" | "end", session: { id: string; cwd: string; ref?: string }, ctx?: any) {
+	// Kata owns session attention semantics. It has no omp harness yet; pi is the
+	// closest, and the name only selects payload parsing and the session token.
+	async function attention(mode: "start" | "end", session: { id: string; cwd: string; ref?: string }) {
 		const ref = session.ref;
 		if (!ref) return;
 		try {
-			let issue = await owned(ref, session.cwd);
-			const token = `omp:${process.pid}:${session.id}`;
-			if (mode === "start") {
-				issue = await work(ref, "work.attention_session", token, session.cwd, issue);
-				issue = await work(ref, "work.attention", "ok", session.cwd, issue, token);
-			} else if (issue.metadata?.["work.attention_session"] === token) {
-				if (issue.metadata?.["work.attention"] === "ok") {
-					issue = await work(ref, "work.attention", "needs-human", session.cwd, issue, token);
-					issue = await work(ref, "work.attention_msg", "omp session ended; review the current work before continuing.", session.cwd, issue, token);
-				}
-				issue = await work(ref, "work.attention_session", `ended:${token}`, session.cwd, issue, token);
-			}
+			// The native hook guards revisions, not the actor or teammate.
+			await owned(ref, session.cwd);
+			await kata(["agent-hook", "attention-native", "pi", mode, "--session", session.id, "--host-pid", String(process.pid), "--ref", ref], session.cwd, mode === "start" ? 3000 : 1500);
 		} catch (err) {
 			debug(`Kata attention skipped: ${(err as Error).message}`);
 		}
@@ -307,9 +300,9 @@ export default function ompKata(pi: any) {
 			await bind(ctx, explicit);
 			core.resetReminders();
 			if (!id || previous?.id === id) return;
-			if (previous) await attention("end", previous, ctx);
+			if (previous) await attention("end", previous);
 			attentionSession = { id, cwd: core.plan.workspace || path.resolve(ctx.cwd), ref: explicit && core.plan.parent };
-			await attention("start", attentionSession, ctx);
+			await attention("start", attentionSession);
 		}));
 	}
 
@@ -321,6 +314,6 @@ export default function ompKata(pi: any) {
 		if (!main(ctx)) return;
 		const session = attentionSession;
 		attentionSession = undefined;
-		await bounded(serial(async () => { await reconcile(); if (session) await attention("end", session, ctx); }));
+		await bounded(serial(async () => { await reconcile(); if (session) await attention("end", session); }));
 	});
 }
