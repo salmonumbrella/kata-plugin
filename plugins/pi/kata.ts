@@ -30,7 +30,7 @@ const TEAMMATE = /^[a-z0-9][a-z0-9._-]{0,63}$/;
 // env/nohup-style prefixes and assignments, or at the start of a quoted script
 // (`bash -c "pi -p ..."`), may launch a child that needs the lead's parent.
 // Arguments such as `grep pi` or `which pi` do not.
-const PI_LAUNCH = /(?:^|[;&|(`\n'"]|\$\()\s*(?:(?:env|nohup|exec|command|time|setsid|caffeinate)\s+|[A-Za-z_][A-Za-z0-9_]*=(?:'[^']*'|"[^"]*"|[^\s;&|]*)\s+)*(?:[^\s;&|()'"`]*\/)?pi(?=$|[\s;&|)])/;
+const PI_LAUNCH = /(?:^|[;&|(`\n]|\$\(|\b(?:ba|z|da|k)?sh\s+(?:-[a-z]+\s+)*-[a-z]*c\s+['"])\s*(?:(?:env|nohup|exec|command|time|setsid|caffeinate)\s+|[A-Za-z_][A-Za-z0-9_]*=(?:'[^']*'|"[^"]*"|[^\s;&|]*)\s+)*(?:[^\s;&|()'"`]*\/)?pi(?=$|[\s;&|)])/;
 export const launchesPi = (command: string) => PI_LAUNCH.test(command);
 
 // The native adapter reuses this exact baseline on session_start. Preseed it

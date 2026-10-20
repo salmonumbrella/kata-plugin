@@ -485,7 +485,8 @@ test("a child keeps a teammate the lead chose for it", async () => {
 
 test("only commands that run pi count as child launches", () => {
   for (const command of ["pi -p x", "nohup env KATA_TEAMMATE=testwriter pi -p --no-session 'w' &", "./pi -p x", "/opt/homebrew/bin/pi -p", "cd w && pi -p y"]) expect(launchesPi(command)).toBe(true);
-  for (const command of ["grep pi file", "rg pi plugins/", "which pi", "echo pi", "ls pi-dir", "pip install x"]) expect(launchesPi(command)).toBe(false);
+  for (const command of ["bash -c \"pi -p x\"", "sh -c 'pi -p y'", "zsh -lc 'pi -p z'"]) expect(launchesPi(command)).toBe(true);
+  for (const command of ["grep pi file", "rg pi plugins/", "which pi", "echo pi", "ls pi-dir", "pip install x", "grep -rn \"pi config\" .", "echo 'pi now'"]) expect(launchesPi(command)).toBe(false);
 });
 
 test("a child reload keeps its binding", async () => {
