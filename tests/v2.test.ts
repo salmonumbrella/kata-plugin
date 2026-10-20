@@ -456,3 +456,136 @@ test("queued close survives extension recreation and retries only after its dead
     expect((await kata(["audit", "closes", "--json"])).rows.filter((r: any) => r.issue === parent.split("#")[1])).toHaveLength(1);
   } finally { Date.now = now; }
 });
+
+// The 2026-10-19 eval: omp sent todo init and the tests delegation in one batch.
+const evalPlan = ["Implement word_count and top_words in textstats", "Write unittest suite covering word_count, top_words, and empty input", "Run the suite with python3 -m unittest", "Commit the work"];
+test("a delegation spawned in the same batch as todo init binds its plan task", async () => {
+  const app = host(); await app.event("session_start");
+  const hook = app.event("tool_call", { toolName: "task", toolCallId: "eval-batch", input: { context: "Add word_count and top_words to textstats.",
+    tasks: [{ name: "WriteTests", agent: "task", task: "Write the textstats unittest suite in tests/ per the contract above" }] } });
+  const ref = await app.init(evalPlan);
+  await hook;
+  app.emit("task:subagent:lifecycle", { id: "WriteTests", agent: "task", status: "started", sessionFile: `${scratch}/eval-batch.jsonl`, parentToolCallId: "eval-batch", index: 0 });
+  await app.call({ op: "view" });
+  let children = (await show(ref)).children;
+  expect(children).toHaveLength(4);
+  expect(children.find((c: any) => c.title === evalPlan[1]).metadata["omp.subagent_id"]).toBe("WriteTests");
+  expect(children.find((c: any) => c.title === evalPlan[0]).metadata["omp.subagent_id"]).toBeUndefined();
+  // The delegated task never occupies the lead's slot: finishing its own task starts the next one.
+  expect((await app.call({ op: "done", task: evalPlan[0], message, evidence })).isError).toBeUndefined();
+  children = (await show(ref)).children;
+  expect(children.find((c: any) => c.title === evalPlan[2]).metadata["todo.status"]).toBe("in_progress");
+});
+
+test("an unrelated delegation never takes the lead's active task", async () => {
+  const app = host(); await app.event("session_start");
+  const ref = await app.init(["Implement widget", "Write widget tests"]);
+  await app.event("tool_call", { toolName: "task", toolCallId: "probe", input: { task: "Reply with exactly: SUBAGENT-OK" } });
+  app.emit("task:subagent:lifecycle", { id: "probe-agent", status: "started", sessionFile: `${scratch}/probe-agent.jsonl`, parentToolCallId: "probe", index: 0 });
+  await app.call({ op: "view" });
+  const children = (await show(ref)).children;
+  expect(children).toHaveLength(3);
+  expect(children.find((c: any) => c.title === "Implement widget").metadata["omp.subagent_id"]).toBeUndefined();
+  expect(children.find((c: any) => c.metadata?.["omp.subagent_id"] === "probe-agent").title).toBe("Subagent probe-agent");
+});
+
+test("a finished delegate that leaves its plan task open hands it back for review", async () => {
+  process.env.KATA_TEAMMATE = "lead-mate";
+  const app = host(); await app.event("session_start");
+  const ref = await app.init(["Implement widget", "Write widget tests"]);
+  await app.event("tool_call", { toolName: "task", toolCallId: "handback", input: { name: "WriteTests", task: "Write the widget tests" } });
+  const sessionFile = `${scratch}/handback.jsonl`;
+  app.emit("task:subagent:lifecycle", { id: "handback", status: "started", sessionFile, parentToolCallId: "handback", index: 0 });
+  await app.call({ op: "view" });
+  const task = (await show(ref)).children.find((c: any) => c.title === "Write widget tests");
+  expect(task.metadata["omp.subagent_id"]).toBe("handback");
+  expect((await app.call({ op: "done", task: "Write widget tests", message, evidence })).isError).toBe(true);
+  app.emit("task:subagent:lifecycle", { id: "handback", status: "completed", sessionFile });
+  await app.call({ op: "view" });
+  const settled = await show(`v2test#${task.short_id}`);
+  expect(settled.labels.some((l: any) => l.label === "needs-review")).toBe(true);
+  expect(settled.issue.metadata.teammate).toBe("lead-mate");
+  expect(settled.issue.metadata["todo.status"]).toBe("pending");
+  expect((await kata(["inbox", "--for", "v2-builder/lead-mate", "--json"])).requests.some((r: any) => r.ref.endsWith(task.short_id))).toBe(true);
+  expect((await app.call({ op: "done", task: "Write widget tests", message, evidence })).isError).toBeUndefined();
+  const closed = await show(`v2test#${task.short_id}`);
+  expect(closed.issue.status).toBe("closed");
+  expect(closed.labels.some((l: any) => l.label === "needs-review")).toBe(false);
+});
+
+test("delegate teammates differ across sessions that reuse an agent name", async () => {
+  const teammates: string[] = [];
+  for (const n of [1, 2]) {
+    const app = host(); await app.event("session_start"); const ref = await app.init([`Reused agent name ${n}`]);
+    app.emit("task:subagent:lifecycle", { id: "WriteTests", status: "started", sessionFile: `${scratch}/reused-name-${n}.jsonl` });
+    await app.call({ op: "view" });
+    teammates.push((await show(ref)).children.find((c: any) => c.metadata?.["omp.subagent_id"] === "WriteTests").metadata.teammate);
+  }
+  expect(teammates[0]).not.toBe(teammates[1]);
+});
+
+test("adopting an explicit parent retires an empty automatic parent", async () => {
+  const app = host(); await app.event("session_start");
+  await app.event("before_subagent_spawn", { agent: "task" });
+  const auto = (await app.call({ op: "view" })).details.kata.parent;
+  expect(auto).toMatch(/^v2test#/);
+  const explicit = await issue(); await kata(["claim", explicit, "--json"]);
+  await app.event("tool_result", { toolName: "bash", input: { command: `kata claim ${explicit}` }, isError: false, details: { exitCode: 0 } });
+  expect((await app.call({ op: "view" })).details.kata.parent).toBe(`v2test#${explicit}`);
+  const retired = await show(auto);
+  expect(retired.issue.status).toBe("closed");
+  expect(retired.issue.closed_reason).toBe("superseded");
+  expect((await show(explicit)).children ?? []).toHaveLength(0);
+});
+
+test("a long delegation spec binds the plan task its name describes", async () => {
+  const plan = ["Implement word_count and top_words in textstats/__init__.py", "Write unittest suite in tests/ covering both functions incl. empty input (delegated to subagent)", "Run python3 -m unittest from repo root, all green", "Commit functions and tests"];
+  const app = host(); await app.event("session_start");
+  const hook = app.event("tool_call", { toolName: "task", toolCallId: "rerun-batch", input: { tasks: [{ name: "WriteTests", task: "# Target\nCreate `tests/__init__.py` (empty file) and `tests/test_textstats.py` in the current repo workspace. Do NOT create or modify anything else \u2014 in particular do NOT touch or create the `textstats/` package; its implementation lands in parallel and importing it now may fail.\n\n# Change\n1. `tests/__init__.py` \u2014 empty, so `python3 -m unittest` discovery from the repo root finds the suite.\n2. `tests/test_textstats.py` \u2014 unittest suite (e.g. TestWordCount, TestTopWords classes) covering: empty string and whitespace-only input for BOTH functions; basic multi-word counts; tabs/newlines/repeated spaces as separators; mixed-case collapsing to lowercase; tie-breaking alphabetical by word; `n == 0`; `n` greater than the number of distinct words; exact ordering of the returned list of tuples. Deterministic, stdlib only, no file/network I/O.\n\n# Acceptance\nBoth files exist and `python3 -m py_compile tests/test_textstats.py` succeeds. Do NOT run the suite against the package (implementation is mid-flight); a failing import at this stage is expected, not yours to fix." }] } });
+  const ref = await app.init(plan);
+  await hook;
+  app.emit("task:subagent:lifecycle", { id: "WriteTests", status: "started", sessionFile: `${scratch}/rerun-batch.jsonl`, parentToolCallId: "rerun-batch", index: 0 });
+  await app.call({ op: "view" });
+  const children = (await show(ref)).children;
+  expect(children).toHaveLength(4);
+  expect(children.find((c: any) => c.title === plan[1]).metadata["omp.subagent_id"]).toBe("WriteTests");
+});
+
+test("a handed-back plan task can be delegated again", async () => {
+  const app = host(); await app.event("session_start");
+  const ref = await app.init(["Implement gadget", "Write gadget tests"]);
+  for (const [n, state] of [[1, "completed"], [2, "started"]] as const) {
+    const id = `regadget-${n}`, sessionFile = `${scratch}/${id}.jsonl`;
+    expect(await app.event("tool_call", { toolName: "task", toolCallId: id, input: { name: "WriteTests", task: 'Complete "Write gadget tests"' } })).toBeUndefined();
+    app.emit("task:subagent:lifecycle", { id, status: "started", sessionFile, parentToolCallId: id, index: 0 });
+    await app.call({ op: "view" });
+    if (state === "completed") { app.emit("task:subagent:lifecycle", { id, status: "completed", sessionFile }); await app.call({ op: "view" }); }
+  }
+  const children = (await show(ref)).children;
+  expect(children).toHaveLength(2);
+  expect(children.find((c: any) => c.title === "Write gadget tests").metadata["omp.subagent_id"]).toBe("regadget-2");
+});
+
+test("after a hand-back, a bare done closes the lead's own active task", async () => {
+  const app = host(); await app.event("session_start");
+  const ref = await app.init(["Write widget tests", "Implement widget"]);
+  await app.event("tool_call", { toolName: "task", toolCallId: "bare-done", input: { task: 'Complete "Write widget tests"' } });
+  const sessionFile = `${scratch}/bare-done.jsonl`;
+  app.emit("task:subagent:lifecycle", { id: "bare-done", status: "started", sessionFile, parentToolCallId: "bare-done", index: 0 });
+  await app.call({ op: "view" });
+  expect((await app.call({ op: "start", task: "Implement widget" })).isError).toBeUndefined();
+  app.emit("task:subagent:lifecycle", { id: "bare-done", status: "completed", sessionFile });
+  await app.call({ op: "view" });
+  expect((await app.call({ op: "done", message, evidence })).isError).toBeUndefined();
+  const children = (await show(ref)).children;
+  expect(children.find((c: any) => c.title === "Implement widget").status).toBe("closed");
+  expect(children.find((c: any) => c.title === "Write widget tests").status).toBe("open");
+});
+
+test("a task call that never spawns releases its plan task", async () => {
+  const app = host(); await app.event("session_start"); await app.init(["Write gizmo tests"]);
+  const input = { task: 'Complete "Write gizmo tests"' };
+  expect(await app.event("tool_call", { toolName: "task", toolCallId: "denied", input })).toBeUndefined();
+  await app.event("tool_result", { toolName: "task", toolCallId: "denied", isError: true, input });
+  expect(await app.event("tool_call", { toolName: "task", toolCallId: "retry", input })).toBeUndefined();
+});

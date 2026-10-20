@@ -34,6 +34,6 @@ pi install git:github.com/salmonumbrella/kata-plugin
 pi install ./kata-plugin/plugins/pi
 ```
 
-Requires Kata 0.18 for these plugins, plus the selected harness. Native attention through `kata agent-hook` requires Kata 0.19. The Claude function-hook API must be available; tested host versions are Claude Code 2.1.291, oh-my-pi 18.6.3, and pi 1.0.2. Bun and Node are needed for development.
+Requires Kata 0.19, plus the selected harness. The omp plugin delegates session attention to `kata agent-hook attention-native`, and settle comments use Kata 0.19 comment idempotency keys. The Claude function-hook API must be available; tested host versions are Claude Code 2.1.291, oh-my-pi 18.6.3, and pi 1.0.2. Bun and Node are needed for development.
 
 Start with the [first session tutorial](docs/tutorials/first-session.md), [installation guide](docs/how-to/install.md), or [development guide](docs/development.md). See [completion rules](docs/reference/closing-rules.md) and [limits](docs/explanation/limits.md) before adopting automatic closure.

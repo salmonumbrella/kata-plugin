@@ -318,6 +318,22 @@ test("real sibling throttle leaves the fourth registered close pending and retri
   } finally { await h.stop(); }
 });
 
+test("real compound claim script adopts the plan root it claimed", async () => {
+  const h = await fixture({bound: false});
+  try {
+    const root = (await h.json(["create", "Compound plan root", "--force-new"])).issue.short_id;
+    const child = (await h.json(["create", "Compound plan child", "--parent", root, "--force-new"])).issue.short_id;
+    await h.dispatch("session.start", {cwd: h.cwd});
+    const command = `set -e\nP=${root}; F=${child}\nkata claim $F --agent; kata claim $P --agent`;
+    await h.dispatch("tool.call", {tool: "Bash", tool_use_id: "compound", command}, async () => {
+      // The real output of the script's two claims, in order.
+      const outputs = [(await h.kata(["claim", child, "--agent"])).stdout, (await h.kata(["claim", root, "--agent"])).stdout];
+      return {result: {exitCode: 0}, text: outputs.join("")};
+    });
+    assert.equal(h.stored.get("session/real-session/binding/parent").parent, `realtest#${root}`);
+  } finally {await h.stop();}
+});
+
 test("real workspace claim keeps selected workspace on every delegated effect", async () => {
   const h = await fixture({bound: false});
   try {

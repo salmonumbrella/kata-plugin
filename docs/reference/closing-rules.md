@@ -10,4 +10,4 @@ Prefer the delegate's own Kata close. For an open child, the Claude fallback req
 
 Documentation-only writers can supply their own explicit verification with reviewed paths. Every observed write must qualify as documentation; code/config/test writes veto this exception. Workflow completion instead uses each writing contributor's own verified result and reported repository files. A container's blanket claim cannot certify unverified nested writers.
 
-This fallback still exists for Claude children. OMP delegates close themselves. Automatic-parent completion in every adapter trusts Kata close records and never reconstructs proof from shell commands.
+This fallback still exists for Claude children. OMP and pi delegates close themselves; one that finishes without closing hands its plan task back to the lead with `needs-review`, and the lead's own accepted close then removes the label. Automatic-parent completion in every adapter trusts Kata close records and never reconstructs proof from shell commands.

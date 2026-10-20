@@ -277,19 +277,40 @@ for (const race of ["owner", "teammate", "close", "owner-ABA"]) {
     expect((await show(ref)).metadata["todo.status"]).toBe("pending");
   });
 }
-test("owned session attention starts and ends with guards", async () => {
+test("owned session attention is delegated to Kata's native hook", async () => {
   const parent = await issue();
   await claim(parent);
   process.env.KATA_REF = parent;
   try {
     const app = host(parent);
     await app.begin();
-    expect((await show(parent)).metadata["work.attention"]).toBe("ok");
+    const started = await show(parent);
+    expect(started.metadata["work.attention"]).toBe("ok");
+    expect(started.metadata["work.attention_session"]).toBeTruthy();
     await app.shutdown();
-    expect((await show(parent)).metadata["work.attention"]).toBe("needs-human");
-    const writes = app.calls.filter(args => args[0] === "meta" && args[3]?.startsWith("work."));
-    expect(writes.length).toBeGreaterThan(0);
-    for (const args of writes) expect(args).toContain("--if-match");
+    const ended = await show(parent);
+    expect(ended.metadata["work.attention"]).toBe("needs-human");
+    expect(ended.metadata["work.attention_session"]).not.toBe(started.metadata["work.attention_session"]);
+    const hooks = app.calls.filter(args => args[0] === "agent-hook");
+    expect(hooks.map(args => args.slice(0, 4))).toEqual([["agent-hook", "attention-native", "pi", "start"], ["agent-hook", "attention-native", "pi", "end"]]);
+    for (const args of hooks) expect(args).toEqual(expect.arrayContaining(["--session", `ownership-${parent}`, "--host-pid", String(process.pid), "--ref", parent]));
+    expect(app.calls.filter(args => args[0] === "meta" && args[3]?.startsWith("work."))).toEqual([]);
+  } finally { delete process.env.KATA_REF; }
+});
+test("session end leaves a blocker set during the session", async () => {
+  const parent = await issue();
+  await claim(parent);
+  process.env.KATA_REF = parent;
+  try {
+    const app = host(parent);
+    await app.begin();
+    await set(parent, "work.attention", "stuck");
+    await set(parent, "work.attention_msg", "waiting on an upstream fix");
+    await app.shutdown();
+    const final = await show(parent);
+    expect(final.metadata["work.attention"]).toBe("stuck");
+    expect(final.metadata["work.attention_msg"]).toBe("waiting on an upstream fix");
+
   } finally { delete process.env.KATA_REF; }
 });
 test("session shutdown respects a teammate handoff", async () => {
@@ -308,31 +329,6 @@ test("session shutdown respects a teammate handoff", async () => {
     expect((await show(parent)).metadata["work.attention_msg"]).toBe("another worker is investigating");
   } finally { delete process.env.KATA_REF; }
 });
-for (const race of ["attention", "message", "message-after-own-attention"]) {
-  test(`shutdown preserves a ${race} change before the guarded helper reread`, async () => {
-    const parent = await issue();
-    await claim(parent);
-    process.env.KATA_REF = parent;
-    let shuttingDown = false, reads = 0, raced = false;
-    try {
-      const app = host(parent, async args => {
-        if (shuttingDown && args[0] === "show" && args[1] === parent && ++reads === (race === "message-after-own-attention" ? 3 : 2)) {
-          raced = true;
-          if (race === "attention") await set(parent, "work.attention", "stuck");
-          await set(parent, "work.attention_msg", "new blocker before helper reread");
-        }
-      });
-      await app.begin();
-      shuttingDown = true;
-      await app.shutdown();
-      expect(raced).toBe(true);
-      const final = await show(parent);
-      expect(final.metadata["work.attention_msg"]).toBe("new blocker before helper reread");
-      expect(final.metadata["work.attention"]).toBe(race === "attention" ? "stuck" : race === "message" ? "ok" : "needs-human");
-      expect(app.notices).toEqual([]);
-    } finally { delete process.env.KATA_REF; }
-  });
-}
 for (const op of ["start", "block", "unblock"]) {
 test(`${op} preserves a changed decision before the guarded helper reread`, async () => {
   const parent = await issue();
@@ -355,48 +351,6 @@ test(`${op} preserves a changed decision before the guarded helper reread`, asyn
   expect(final.metadata["work.attention_msg"]).toBe("new task blocker before helper reread");
   expect(final.metadata["todo.status"]).toBe(status);
 });
-}
-test("session start preserves a blocker before its first helper reread", async () => {
-  const parent = await issue();
-  await claim(parent);
-  process.env.KATA_REF = parent;
-  let reads = 0;
-  try {
-    const app = host(parent, async args => {
-      if (args[0] === "show" && args[1] === parent && ++reads === 5) {
-        await set(parent, "work.attention", "stuck");
-        await set(parent, "work.attention_msg", "new session-start blocker");
-      }
-    });
-    await app.begin();
-    const final = await show(parent);
-    expect(final.metadata["work.attention"]).toBe("stuck");
-    expect(final.metadata["work.attention_msg"]).toBe("new session-start blocker");
-    expect(final.metadata["work.attention_session"]).toBeUndefined();
-    expect(app.notices).toEqual([]);
-  } finally { delete process.env.KATA_REF; }
-});
-for (const key of ["work.attention", "work.attention_msg"]) {
-  test(`shutdown preserves ${key} changed after the helper reread`, async () => {
-    const parent = await issue();
-    await claim(parent);
-    process.env.KATA_REF = parent;
-    let shuttingDown = false, raced = false;
-    try {
-      const app = host(parent, async args => {
-        if (shuttingDown && !raced && args[0] === "meta" && args[3] === key) {
-          raced = true;
-          await set(parent, key, key === "work.attention" ? "stuck" : "new blocker after helper reread");
-        }
-      });
-      await app.begin();
-      shuttingDown = true;
-      await app.shutdown();
-      expect(raced).toBe(true);
-      expect((await show(parent)).metadata[key]).toBe(key === "work.attention" ? "stuck" : "new blocker after helper reread");
-      expect(app.notices).toEqual([]);
-    } finally { delete process.env.KATA_REF; }
-  });
 }
 test("an attention message race cannot be cleared during unblock", async () => {
   const parent = await issue();

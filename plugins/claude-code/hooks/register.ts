@@ -5,6 +5,7 @@ import {
   parseKata,
   claimedRef,
   claimedWorkspace,
+  reportedClaims,
   endCommand,
   kataImpersonation,
   rewriteKata,
@@ -277,6 +278,19 @@ async function delegationParent($: EngineInterface, deadline?: number, captured?
     return s.parent;
   });
 }
+/** The claimed issue whose parent was not also claimed (the plan root). Only
+ * issues the lead now owns count: output lines alone do not prove a claim. */
+async function claimedRoot($: EngineInterface, refs: string[]): Promise<string | undefined> {
+  if (!refs.length) return;
+  const me = JSON.parse(await run($, ["whoami", "--json"])).actor;
+  const views: {ref: string; view: IssueView}[] = [];
+  for (const ref of refs.slice(0, 5)) {
+    try { views.push({ref, view: await show($, ref)}); } catch { /* An unreadable claim is not adopted. */ }
+  }
+  const claimed = new Set(views.map(({view}) => view.issue.short_id));
+  const open = views.filter(({view}) => view.issue.status === "open" && !!me && view.issue.owner === me);
+  return (open.find(({view}) => !view.parent?.short_id || !claimed.has(view.parent.short_id)) ?? open[0])?.ref;
+}
 async function adoptParent($: EngineInterface, ref: string, workspace?: string) {
   return parentLock(async () => {
     const s = await session($);
@@ -416,8 +430,9 @@ async function restore($: EngineInterface) {
 
 type IssueView = {
   event?: {project_name?: string};
-  issue: { qualified_id?: string; short_id: string; uid?: string; status: string; revision: number; closed_at?: string; closed_reason?: string; metadata?: Record<string, unknown> };
+  issue: { qualified_id?: string; short_id: string; owner?: string; uid?: string; status: string; revision: number; closed_at?: string; closed_reason?: string; metadata?: Record<string, unknown> };
   children?: IssueView["issue"][];
+  parent?: { qualified_id?: string; short_id?: string } | null;
   comments?: { body: string }[];
   labels?: { label: string }[];
 };
@@ -1245,7 +1260,17 @@ async function reconcileAgents($: EngineInterface) {
 async function spawnBinding($: EngineInterface, e: {description?: string; prompt: string}, context: KataSession, key: string, deadline: number): Promise<{ref?: string; note?: string}> {
   if (context.unbound || context.autoDisabled || !compatibleScope(context.scope, await executionScope($))) return {};
   const known = [context.parent, context.autoParent, context.promptRef].filter((r): r is string => !!r);
-  const named = namedIssue([e.description ?? "", e.prompt], known);
+  let named = namedIssue([e.description ?? "", e.prompt], known);
+  // The lead's own plan children may be named by bare short id ("kata issue
+  // erjg"); look them up only when nothing qualified matched.
+  if (!named.ref && context.parent && context.parent !== context.autoParent && /\b(?:issue|kata|ref)\s*[:=]?\s*[`"'(]?[0-9a-hjkmnp-tv-z]{4,8}\b/i.test(`${e.description ?? ""} ${e.prompt}`)) {
+    try {
+      const project = context.parent.split("#")[0];
+      for (const child of (await show($, context.parent, {workspace: context.workspace ?? context.cwd, project, deadline}, 1000)).children ?? [])
+        if (child.status === "open") known.push(child.qualified_id ?? `${project}#${child.short_id}`);
+      named = namedIssue([e.description ?? "", e.prompt], known);
+    } catch { /* Without the children, only qualified refs bind. */ }
+  }
   if (!named.ref) return {note: named.reason};
   const project = named.ref.split("#")[0];
   try {
@@ -1631,6 +1656,11 @@ export const register: Register = (on, options) => {
           if (tokens.includes(ref) || tokens.includes(short)) {
             await adoptParent($, ref, claimedWorkspace(parseKata(e.command) ?? []));
                 }
+        } else if (!parseKata(e.command)) {
+          // A compound script (the lead creating and claiming its own plan):
+          // adopt the topmost issue Kata reports it claimed.
+          const root = await claimedRoot($, reportedClaims(e.command, result.text ?? ""));
+          if (root) await adoptParent($, root);
         }
       }
     });

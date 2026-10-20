@@ -1,7 +1,7 @@
 import { test, expect } from "claude-code/testing";
 import { harness, start, spawn, command, canonicalContract } from "./support.ts";
 import type { EngineCall } from "claude-code/testing";
-import { claimedRef, parseKata } from "../hooks/commands.ts";
+import { claimedRef, parseKata, reportedClaims } from "../hooks/commands.ts";
 
 const userPrompt = async ($: import("claude-code/testing").Engine, text: string) =>
   ($.prompt.submit as EngineCall<"prompt.submit">)({ text, wait: false, origin: { kind: "composer" } });
@@ -317,4 +317,31 @@ test("long first sentence is cut at a clause or word boundary, never mid-word", 
   await $.agent.spawn(spawn());
   const title = h.calls.find(a => a[1] === "create" && a.includes("claude-session"))![2]!;
   expect(title).toBe("Claude session: Refactor the evidence collector so that shell chains");
+});
+
+// The 2026-10-19 eval: the lead made and claimed its own plan in one script,
+// then named a plan child as the delegate's issue by bare short id.
+test("a plan the lead claims in a compound script is adopted and its children bind spawns", async ($, on) => {
+  const h = harness(on, "");
+  for (const [id, parent] of [["kk4d", undefined], ["gfzd", "fixture#kk4d"], ["erjg", "fixture#kk4d"]] as const)
+    h.issues.set(id, {issue: {short_id: id, qualified_id: `fixture#${id}`, status: "open", revision: 1, owner: "actor", metadata: {}}, parent, comments: [], labels: []} as any);
+  h.issues.set("zz12", {issue: {short_id: "zz12", qualified_id: "fixture#zz12", status: "open", revision: 1, owner: "bob", metadata: {}}, comments: [], labels: []} as any);
+  on("agent.spawn", () => ({model: "sonnet", agentId: "a1"}));
+  // zz12 only appears in the output; the lead does not own it, so it is not adopted.
+  on("tool.call", {tool: "Bash"}, () => ({result: {}, text: "zz12 assigned to bob\nP=kk4d F=gfzd T=erjg\nOK claim gfzd\nIssue: gfzd \"Implement\"\nOK claim kk4d\nIssue: kk4d \"Plan\""}));
+  await $.session.start(start);
+  await claim($, "set -e\nP=$(kata create plan --json | jq -r .issue.short_id)\nkata claim $F --agent; kata claim $P --agent");
+  expect((await $.command.run(command())).text).toContain("fixture#kk4d");
+  await $.agent.spawn(spawn({prompt: "Write the tests; this work is kata issue erjg (project fixture).", description: "Write tests"}));
+  await h.clock.settle();
+  expect(h.calls.some(a => a[1] === "create")).toBe(false);
+  expect(h.calls.some(a => a.includes("claude-session"))).toBe(false);
+});
+
+test("compound claim output counts only the lead's own claims", () => {
+  const out = "OK claim gfzd\nkk4d assigned to vlad\nzz12 assigned to bob\n";
+  expect(reportedClaims("set -e\nkata claim $F --agent; kata claim $P", out)).toEqual(["gfzd", "kk4d", "zz12"]);
+  expect(reportedClaims("kata assign $X --to bob; kata claim $Y --agent", out)).toEqual(["gfzd"]);
+  expect(reportedClaims("kata claim $Y --as someone --agent; true", out)).toEqual([]);
+  expect(reportedClaims("echo done; ls", out)).toEqual([]);
 });
