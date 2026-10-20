@@ -162,26 +162,37 @@ export function taskTokens(text: string): string[] {
 
 // Pick the plan task a delegation serves. An exact title or ref wins; otherwise
 // a clear weighted token overlap does, with the task's leading verb counted
-// twice. The lead's active task scores at half weight, and is the fallback only
-// when the delegation explicitly hands over the current task.
-export function matchDelegation(tasks: Task[], text: string, unavailable: ReadonlySet<string> = new Set(), single = true): Task | undefined {
+// twice, first for the short label (omp's task name), then the full text. The
+// lead's active task scores at half weight, and is the fallback only when the
+// delegation explicitly hands over the current task.
+export function matchDelegation(tasks: Task[], text: string, unavailable: ReadonlySet<string> = new Set(), single = true, label = ""): Task | undefined {
 	const candidates = tasks.filter(t => OPEN.has(t.status) && t.status !== "blocked" && !t.delegated && !unavailable.has(t.ref));
-	const words = new Set(text.split(/[^A-Za-z0-9#_-]+/));
-	const named = candidates.filter(t => text.includes(t.content) || text.includes(t.ref) || words.has(t.ref.split("#").pop()!));
+	const full = label ? `${label}\n${text}` : text;
+	// A bare short id can be an ordinary word ("test"), so it needs a marker.
+	const bare = (id: string) => new RegExp(`(?:\\b(?:issue|kata|ref|task)\\s*[:=]?\\s*|#)${id}(?![\\w-])`, "i").test(full);
+	const named = candidates.filter(t => full.includes(t.content) || full.includes(t.ref) || bare(t.ref.split("#").pop()!));
 	if (named.length === 1) return named[0];
 	if (named.length > 1) return;
-	const wanted = new Set(taskTokens(text)), open = tasks.filter(t => OPEN.has(t.status)).map(t => taskTokens(t.content));
-	const weight = (token: string) => Math.log((open.length + 1) / Math.max(1, open.filter(tokens => tokens.includes(token)).length));
-	const scored = candidates.map(task => {
-		const own = taskTokens(task.content), shared = own.filter(token => wanted.has(token));
-		const total = own.reduce((sum, token) => sum + weight(token), 0), overlap = shared.reduce((sum, token) => sum + weight(token), 0);
-		const score = (overlap + (own[0] && wanted.has(own[0]) ? weight(own[0]) : 0)) * (task.status === "in_progress" ? 0.5 : 1);
-		return { task, score, eligible: shared.length >= 2 && total > 0 && overlap / total >= 0.3 };
-	}).sort((a, b) => b.score - a.score);
-	const [best, runner] = scored;
-	if (best?.eligible && (!runner || best.score >= runner.score * 1.5)) return best.task;
+	const open = tasks.filter(t => OPEN.has(t.status)).map(t => taskTokens(t.content));
+	const df = (token: string) => open.filter(tokens => tokens.includes(token)).length;
+	const weight = (token: string) => Math.log((open.length + 1) / Math.max(1, df(token)));
+	const overlap = (source: string) => {
+		const wanted = new Set(taskTokens(source));
+		// Coverage counts against the task and against the source's plan vocabulary.
+		const vocabulary = [...wanted].filter(token => df(token) > 0).reduce((sum, token) => sum + weight(token), 0);
+		const scored = candidates.map(task => {
+			const own = taskTokens(task.content), shared = own.filter(token => wanted.has(token));
+			const total = own.reduce((sum, token) => sum + weight(token), 0), common = shared.reduce((sum, token) => sum + weight(token), 0);
+			const score = (common + (own[0] && wanted.has(own[0]) ? weight(own[0]) : 0)) * (task.status === "in_progress" ? 0.5 : 1);
+			return { task, score, eligible: shared.length >= 2 && common > 0 && Math.max(common / total, common / vocabulary) >= 0.3 };
+		}).sort((a, b) => b.score - a.score);
+		const [best, runner] = scored;
+		return best?.eligible && (!runner || best.score >= runner.score * 1.5) ? best.task : undefined;
+	};
+	const found = (label && overlap(label)) || overlap(full);
+	if (found) return found;
 	const active = candidates.filter(t => t.status === "in_progress");
-	if (single && active.length === 1 && /\b(?:current|active|this)\s+(?:task|todo|item|step)\b/i.test(text)) return active[0];
+	if (single && active.length === 1 && /\b(?:current|active|this)\s+(?:task|todo|item|step)\b/i.test(full)) return active[0];
 }
 
 export function phasesOf(tasks: Task[]): { name: string; tasks: Task[] }[] {

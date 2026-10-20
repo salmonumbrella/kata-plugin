@@ -23,6 +23,21 @@ test("eval delegations bind the tests task, never the lead's active task", () =>
   expect(pick(omp, "Reply with exactly: SUBAGENT-OK")).toBeUndefined();
 });
 
+// The 2026-10-20 re-eval: a long spec overlaps the run task too ("Do NOT run
+// the suite ... repo root"); omp's short task name decides it.
+const rerun = [
+  task("r#4mpk", "Implement word_count and top_words in textstats/__init__.py", "in_progress"),
+  task("r#t3st", "Write unittest suite in tests/ covering both functions incl. empty input (delegated to subagent)"),
+  task("r#rvn2", "Run python3 -m unittest from repo root, all green"),
+  task("r#cm7t", "Commit functions and tests"),
+];
+const rerunSpec = "# Target\nCreate `tests/__init__.py` (empty file) and `tests/test_textstats.py` in the current repo workspace. Do NOT create or modify anything else \u2014 in particular do NOT touch or create the `textstats/` package; its implementation lands in parallel and importing it now may fail.\n\n# Change\n1. `tests/__init__.py` \u2014 empty, so `python3 -m unittest` discovery from the repo root finds the suite.\n2. `tests/test_textstats.py` \u2014 unittest suite (e.g. TestWordCount, TestTopWords classes) covering: empty string and whitespace-only input for BOTH functions; basic multi-word counts; tabs/newlines/repeated spaces as separators; mixed-case collapsing to lowercase; tie-breaking alphabetical by word; `n == 0`; `n` greater than the number of distinct words; exact ordering of the returned list of tuples. Deterministic, stdlib only, no file/network I/O.\n\n# Acceptance\nBoth files exist and `python3 -m py_compile tests/test_textstats.py` succeeds. Do NOT run the suite against the package (implementation is mid-flight); a failing import at this stage is expected, not yours to fix.";
+test("a long delegation spec binds by its task name", () => {
+  expect(matchDelegation(rerun, rerunSpec, new Set(), true, "WriteTests")?.ref).toBe("r#t3st");
+  expect(matchDelegation(rerun, rerunSpec, new Set(), true, "RunUnittest")?.ref).toBe("r#rvn2");
+  expect(matchDelegation(rerun, rerunSpec)?.ref).toBeUndefined(); // too close to call without the name
+});
+
 test("exact titles, qualified refs and bare short ids bind directly", () => {
   expect(pick(omp, `Do "${omp[3].content}" now`)).toBe("e#cmt1");
   expect(pick(omp, "Work on e#run1")).toBe("e#run1");

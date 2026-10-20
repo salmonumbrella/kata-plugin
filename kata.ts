@@ -20,7 +20,7 @@ export const kataCommands = (command: string) => parseKataCommands(command, EXEC
 
 type Delegate = {
 	id: string; teammate: string; sessionFile?: string; parentAgentId?: string;
-	state: string; planRef?: string; text?: string; single?: boolean; ref?: string; binding?: Binding; ready?: Promise<void>; reported?: string;
+	state: string; planRef?: string; label?: string; text?: string; single?: boolean; ref?: string; binding?: Binding; ready?: Promise<void>; reported?: string;
 	coordinator: Coordinator;
 };
 type Coordinator = {
@@ -38,7 +38,7 @@ export default function ompKata(pi: any) {
 	let attentionSession: { id: string; cwd: string; ref?: string } | undefined;
 	let coordinator: Coordinator | undefined;
 	// Spawn text per task tool call; refs once a plan existed when it was seen.
-	const assignments = new Map<string, { texts: string[]; refs?: (string | undefined)[] }>();
+	const assignments = new Map<string, { labels: string[]; texts: string[]; refs?: (string | undefined)[] }>();
 	const core = createKataCore({
 		exec: (...args) => pi.exec(...args),
 		appendEntry: (...args) => pi.appendEntry(...args),
@@ -106,9 +106,9 @@ export default function ompKata(pi: any) {
 				record.binding = binding;
 				// todo init and task often share one batch, so the plan may not have
 				// existed when the task call was seen. Match against it now.
-				if (!record.planRef && record.text?.trim()) {
+				if (!record.planRef && (record.text || record.label)?.trim()) {
 					await load(binding.workspace);
-					record.planRef = matchDelegation(core.plan.tasks, record.text, reserved(record), record.single)?.ref;
+					record.planRef = matchDelegation(core.plan.tasks, record.text ?? "", reserved(record), record.single, record.label)?.ref;
 				}
 				if (record.planRef) {
 					const ref = record.planRef;
@@ -202,7 +202,7 @@ export default function ompKata(pi: any) {
 			if (!record) {
 				const assignment = main(core.currentCtx) ? assignments.get(event.parentToolCallId) : undefined;
 				const text = [assignment?.texts[event.index ?? 0], event.description].filter(Boolean).join("\n");
-				record = { id: event.id, planRef: assignment?.refs?.[event.index ?? 0], text, single: (assignment?.texts.length ?? 1) === 1, teammate: teammateFor(event.id, owner.id), parentAgentId: core.currentCtx.agent?.id, sessionFile: event.sessionFile, state: "started", coordinator: owner };
+				record = { id: event.id, planRef: assignment?.refs?.[event.index ?? 0], label: assignment?.labels[event.index ?? 0], text, single: (assignment?.texts.length ?? 1) === 1, teammate: teammateFor(event.id, owner.id), parentAgentId: core.currentCtx.agent?.id, sessionFile: event.sessionFile, state: "started", coordinator: owner };
 				owner.records.set(event.id, record);
 			}
 			record.state = "started";
@@ -223,17 +223,20 @@ export default function ompKata(pi: any) {
 		if (main(ctx) || !core.currentCtx || !main(core.currentCtx)) core.currentCtx = ctx;
 		if (main(ctx) && event.toolName === "task" && event.toolCallId) {
 			const items: any[] = Array.isArray(event.input?.tasks) ? event.input.tasks : [event.input];
-			const texts = items.map(item => [item?.name, item?.task, item?.description].filter(value => typeof value === "string").join("\n"));
-			const assignment: { texts: string[]; refs?: (string | undefined)[] } = { texts };
+			// omp's short task name is the clearest signal; the task text is the fallback.
+			const labels = items.map(item => typeof item?.name === "string" ? item.name : "");
+			const texts = items.map(item => [item?.task, item?.description].filter(value => typeof value === "string").join("\n"));
+			const assignment: { labels: string[]; texts: string[]; refs?: (string | undefined)[] } = { labels, texts };
 			assignments.set(event.toolCallId, assignment);
 			return serial(async () => {
 				if (!core.plan.parent || core.plan.local) return;
 				await load(core.plan.workspace!);
 				const taken = reserved();
-				assignment.refs = texts.map(text => {
-					const named = core.plan.tasks.filter(task => OPEN.has(task.status) && (text.includes(task.content) || text.includes(task.ref)));
+				assignment.refs = texts.map((text, index) => {
+					const full = `${labels[index]}\n${text}`;
+					const named = core.plan.tasks.filter(task => OPEN.has(task.status) && (full.includes(task.content) || full.includes(task.ref)));
 					if (named.length === 1 && (taken.has(named[0].ref) || named[0].delegated)) throw new Error(`Plan task ${named[0].ref} is already delegated.`);
-					const selected = matchDelegation(core.plan.tasks, text, taken, texts.length === 1);
+					const selected = matchDelegation(core.plan.tasks, text, taken, texts.length === 1, labels[index]);
 					if (selected) taken.add(selected.ref);
 					return selected?.ref;
 				});
