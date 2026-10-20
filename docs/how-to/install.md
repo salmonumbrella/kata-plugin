@@ -1,6 +1,6 @@
 # Install
 
-Install Kata 0.18 or later and initialize the intended project with `kata init --project example`. Use Kata 0.19 or later for native attention hooks. These plugins use `agent-contract-hook`, revision guards, typed evidence, `audit closes`, and `events`.
+Install Kata 0.19 or later and initialize the intended project with `kata init --project example`. These plugins use `agent-contract-hook`, revision guards, typed evidence, `audit closes`, and `events`.
 
 ## Claude Code
 
