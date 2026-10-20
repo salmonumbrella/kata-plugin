@@ -5,7 +5,7 @@ import path from "node:path";
 import { promisify } from "node:util";
 import { Value } from "typebox/value";
 import { assertIsolated } from "./isolation";
-import piKata from "../plugins/pi/kata";
+import piKata, { launchesPi } from "../plugins/pi/kata";
 assertIsolated();
 const binary = process.env.KATA_TEST_EXECUTABLE!;
 if (!binary || !path.isAbsolute(binary)) throw new Error("Set KATA_TEST_EXECUTABLE to the guarded Kata binary.");
@@ -480,4 +480,9 @@ test("a child keeps a teammate the lead chose for it", async () => {
   expect(child.entries.find(e => e.customType === "io.kata.pi.delegate").data.teammate).toBe("testwriter");
   expect(process.env.KATA_INBOX_USER).toBe("pi-builder/testwriter");
   leaveChild();
+});
+
+test("only commands that run pi count as child launches", () => {
+  for (const command of ["pi -p x", "nohup env KATA_TEAMMATE=testwriter pi -p --no-session 'w' &", "./pi -p x", "/opt/homebrew/bin/pi -p", "cd w && pi -p y"]) expect(launchesPi(command)).toBe(true);
+  for (const command of ["grep pi file", "rg pi plugins/", "which pi", "echo pi", "ls pi-dir", "pip install x"]) expect(launchesPi(command)).toBe(false);
 });

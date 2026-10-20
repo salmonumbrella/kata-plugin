@@ -26,8 +26,11 @@ export function inheritsModel(argv: string[]): { model: boolean; thinking: boole
 }
 
 const TEAMMATE = /^[a-z0-9][a-z0-9._-]{0,63}$/;
-// Commands that may launch a child pi process, which needs the lead's parent.
-export const launchesPi = (command: string) => /(?:^|[\s;&|(`'"])pi(?=\s|$)/.test(command);
+// A command that runs pi (by name or path) in command position, after any
+// env/nohup-style prefixes and assignments, may launch a child that needs the
+// lead's parent. Arguments such as `grep pi` or `which pi` do not.
+const PI_LAUNCH = /(?:^|[;&|(`\n]|\$\()\s*(?:(?:env|nohup|exec|command|time|setsid|caffeinate)\s+|[A-Za-z_][A-Za-z0-9_]*=(?:'[^']*'|"[^"]*"|[^\s;&|]*)\s+)*(?:[^\s;&|()'"`]*\/)?pi(?=$|[\s;&|)])/;
+export const launchesPi = (command: string) => PI_LAUNCH.test(command);
 
 // The native adapter reuses this exact baseline on session_start. Preseed it
 // when we run first; leave its captured baseline alone when we run second.
@@ -299,7 +302,10 @@ export default async function piKata(pi: ExtensionAPI) {
 			issue = await core.work(ref, "work.attention", "needs-human", workspace, issue);
 			await core.work(ref, "work.attention_msg", "Pi child ended without closing its issue; review its report and verification.", workspace, issue);
 			// Hand an unfinished plan task back to the lead, who may verify and close it.
-			if (restore) await core.kata(lead ? ["meta", "set", ref, "teammate", lead] : ["meta", "unset", ref, "teammate"], workspace);
+			if (restore) {
+				await core.kata(["meta", "unset", ref, "pi.subagent_id"], workspace);
+				await core.kata(lead ? ["meta", "set", ref, "teammate", lead] : ["meta", "unset", ref, "teammate"], workspace);
+			}
 			await core.kata(["notify", ref, "--to", `${await core.actor(workspace)}${lead ? `/${lead}` : ""}`, "--message", `Pi child ${delegate.id} ended without closing ${ref}; review it, then close or reassign it.`], workspace);
 		}
 	}), delegate ? 3000 : 250));

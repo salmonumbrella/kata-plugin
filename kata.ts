@@ -150,6 +150,7 @@ export default function ompKata(pi: any) {
 			const lead = process.env.KATA_TEAMMATE || "";
 			if (record.planRef && view.issue.metadata?.teammate === record.teammate) {
 				await kata(lead ? ["meta", "set", record.ref, "teammate", lead, "--if-match", String(revision)] : ["meta", "unset", record.ref, "teammate", "--if-match", String(revision)], cwd);
+				await kata(["meta", "unset", record.ref, "omp.subagent_id"], cwd);
 			}
 			await kata(["label", "add", record.ref, "needs-review"], cwd);
 			await kata(["comment", record.ref, "--idempotency-key", `omp-settle:${record.coordinator.id}:${record.id}:${record.state}`,
@@ -175,9 +176,11 @@ export default function ompKata(pi: any) {
 		}
 	}
 
+	// Unstarted assignments and running delegates hold their tasks; a settled
+	// delegate has handed its task back.
 	function reserved(except?: Delegate): Set<string> {
 		const refs = [...assignments.values()].flatMap(a => a.refs ?? []);
-		for (const record of coordinator?.records.values() ?? []) if (record !== except) refs.push(record.ref || record.planRef);
+		for (const record of coordinator?.records.values() ?? []) if (record !== except && (record.state === "started" || record.reported !== record.state)) refs.push(record.ref || record.planRef);
 		return new Set(refs.filter((ref): ref is string => !!ref));
 	}
 
@@ -202,7 +205,9 @@ export default function ompKata(pi: any) {
 			if (!record) {
 				const assignment = main(core.currentCtx) ? assignments.get(event.parentToolCallId) : undefined;
 				const text = [assignment?.texts[event.index ?? 0], event.description].filter(Boolean).join("\n");
-				record = { id: event.id, planRef: assignment?.refs?.[event.index ?? 0], label: assignment?.labels[event.index ?? 0], text, single: (assignment?.texts.length ?? 1) === 1, teammate: teammateFor(event.id, owner.id), parentAgentId: core.currentCtx.agent?.id, sessionFile: event.sessionFile, state: "started", coordinator: owner };
+				const planRef = assignment?.refs?.[event.index ?? 0];
+				if (assignment?.refs) assignment.refs[event.index ?? 0] = undefined; // the record holds it now
+				record = { id: event.id, planRef, label: assignment?.labels[event.index ?? 0], text, single: (assignment?.texts.length ?? 1) === 1, teammate: teammateFor(event.id, owner.id), parentAgentId: core.currentCtx.agent?.id, sessionFile: event.sessionFile, state: "started", coordinator: owner };
 				owner.records.set(event.id, record);
 			}
 			record.state = "started";

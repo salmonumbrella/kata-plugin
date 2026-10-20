@@ -548,3 +548,18 @@ test("a long delegation spec binds the plan task its name describes", async () =
   expect(children).toHaveLength(4);
   expect(children.find((c: any) => c.title === plan[1]).metadata["omp.subagent_id"]).toBe("WriteTests");
 });
+
+test("a handed-back plan task can be delegated again", async () => {
+  const app = host(); await app.event("session_start");
+  const ref = await app.init(["Implement gadget", "Write gadget tests"]);
+  for (const [n, state] of [[1, "completed"], [2, "started"]] as const) {
+    const id = `regadget-${n}`, sessionFile = `${scratch}/${id}.jsonl`;
+    expect(await app.event("tool_call", { toolName: "task", toolCallId: id, input: { name: "WriteTests", task: 'Complete "Write gadget tests"' } })).toBeUndefined();
+    app.emit("task:subagent:lifecycle", { id, status: "started", sessionFile, parentToolCallId: id, index: 0 });
+    await app.call({ op: "view" });
+    if (state === "completed") { app.emit("task:subagent:lifecycle", { id, status: "completed", sessionFile }); await app.call({ op: "view" }); }
+  }
+  const children = (await show(ref)).children;
+  expect(children).toHaveLength(2);
+  expect(children.find((c: any) => c.title === "Write gadget tests").metadata["omp.subagent_id"]).toBe("regadget-2");
+});
