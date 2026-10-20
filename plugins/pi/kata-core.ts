@@ -160,19 +160,36 @@ export function taskTokens(text: string): string[] {
 	return [...new Set(tokens)];
 }
 
-// Pick the plan task a delegation serves. An exact title or ref wins; otherwise
-// a clear weighted token overlap does, with the task's leading verb counted
-// twice, first for the short label (omp's task name), then the full text. The
-// lead's active task scores at half weight, and is the fallback only when the
-// delegation explicitly hands over the current task.
-export function matchDelegation(tasks: Task[], text: string, unavailable: ReadonlySet<string> = new Set(), single = true, label = ""): Task | undefined {
-	const candidates = tasks.filter(t => OPEN.has(t.status) && t.status !== "blocked" && !t.delegated && !unavailable.has(t.ref));
+const escape = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+// The open task a text names: its title (case-insensitive, whole words; a one-
+// or two-word title only quoted or as the whole text), its qualified ref, or its
+// short id after a marker, since a bare id can be an ordinary word ("test"). A
+// title inside a longer named title yields to the longer one.
+export function namedTask(tasks: Task[], text: string): Task | undefined {
+	const titled = (title: string) => {
+		const phrase = escape(title.trim());
+		if (text.trim().toLowerCase() === title.trim().toLowerCase()) return true;
+		if (new RegExp(`["'\`\u201c\u2018]\\s*${phrase}\\s*["'\`\u201d\u2019]`, "i").test(text)) return true;
+		return title.trim().split(/\s+/).length >= 3 && new RegExp(`(?<![\\w])${phrase}(?![\\w])`, "i").test(text);
+	};
+	const named = tasks.filter(t => OPEN.has(t.status) && (titled(t.content) || text.includes(t.ref) ||
+		new RegExp(`(?:\\b(?:issue|kata|ref|task)\\s*[:=]?\\s*|#)${escape(t.ref.split("#").pop()!)}(?![\\w-])`, "i").test(text)));
+	const longest = named.sort((a, b) => b.content.length - a.content.length)[0];
+	if (longest && named.every(t => t === longest || longest.content.toLowerCase().includes(t.content.toLowerCase()))) return longest;
+}
+
+export type MatchOptions = { unavailable?: ReadonlySet<string>; single?: boolean; label?: string };
+// Pick the plan task a delegation serves. A named task wins, and a named task
+// that is taken binds nothing else. Otherwise a clear weighted token overlap
+// wins, with the task's leading word counted twice, scored first for the short
+// label (omp's task name) and then the full text. The lead's active task scores
+// at half weight and is the fallback only for an explicit current-task handoff.
+export function matchDelegation(tasks: Task[], text: string, { unavailable = new Set(), single = true, label = "" }: MatchOptions = {}): Task | undefined {
+	const available = (t: Task) => OPEN.has(t.status) && t.status !== "blocked" && !t.delegated && !unavailable.has(t.ref);
 	const full = label ? `${label}\n${text}` : text;
-	// A bare short id can be an ordinary word ("test"), so it needs a marker.
-	const bare = (id: string) => new RegExp(`(?:\\b(?:issue|kata|ref|task)\\s*[:=]?\\s*|#)${id}(?![\\w-])`, "i").test(full);
-	const named = candidates.filter(t => full.includes(t.content) || full.includes(t.ref) || bare(t.ref.split("#").pop()!));
-	if (named.length === 1) return named[0];
-	if (named.length > 1) return;
+	const named = namedTask(tasks, full);
+	if (named) return available(named) ? named : undefined;
+	const candidates = tasks.filter(available);
 	const open = tasks.filter(t => OPEN.has(t.status)).map(t => taskTokens(t.content));
 	const df = (token: string) => open.filter(tokens => tokens.includes(token)).length;
 	const weight = (token: string) => Math.log((open.length + 1) / Math.max(1, df(token)));
@@ -307,13 +324,12 @@ export function createKataCore(host: CoreHost, options: CoreOptions) {
 
 	// Keep the decision snapshot through every key write. A fresh lookup may
 	// validate it, but must not rebase the intended transition onto new state.
-	async function work(ref: string, key: string, value: string | undefined, cwd: string, expected: any, session?: string): Promise<any> {
+	async function work(ref: string, key: string, value: string | undefined, cwd: string, expected: any): Promise<any> {
 		const issue = await owned(ref, cwd);
 		const meta = expected.metadata ?? {};
 		if (issue.revision !== expected.revision || Object.hasOwn(issue.metadata ?? {}, key) !== Object.hasOwn(meta, key) || issue.metadata?.[key] !== meta[key]) {
 			throw new Error(`Kata metadata changed for ${ref}; no further work metadata was written.`);
 		}
-		if (session && meta["work.attention_session"] !== session) throw new Error(`Kata attention session changed for ${ref}; no work metadata was written.`);
 		const exists = Object.hasOwn(meta, key);
 		if ((!exists && value === undefined) || meta[key] === value) return expected;
 		const args = value === undefined ? ["meta", "unset", ref, key] : ["meta", "set", ref, key, JSON.stringify(value)];
@@ -452,8 +468,8 @@ export function createKataCore(host: CoreHost, options: CoreOptions) {
 			// rather than leave an empty child that can never auto-close.
 			const shown = JSON.parse(await kata(["show", plan.parent, "--json"], plan.workspace!));
 			if (shown.issue.status === "open" && !shown.children?.length) {
-				autoParents.delete(plan.parent);
 				await kata(["close", plan.parent, "--superseded-by", parent, "--message", `This session adopted ${parent} as its plan parent.`], plan.workspace!);
+				autoParents.delete(plan.parent);
 			} else await kata(["edit", plan.parent, "--parent", parent], plan.workspace!);
 		}
 		if (plan.parent === parent) autoParents.delete(parent);
@@ -565,6 +581,27 @@ export function createKataCore(host: CoreHost, options: CoreOptions) {
 		return `${verb} from the todo plan under ${plan.parent}: "${task.content}". Reason: ${why}. This task was intentionally retired from the plan without asserting completion.`;
 	}
 
+	// A delegated task is the subagent's; it never occupies the lead's slot.
+	const leads = (t: Task) => !t.delegated && !host.isDelegated?.(t.ref);
+
+	// A delegate finished without closing its issue: ask the lead to review it.
+	// A plan task returns to the lead (pending, the lead's teammate) only while
+	// it still carries the delegate's teammate; the subagent id goes last, so a
+	// partial failure leaves it marked delegated rather than free and foreign.
+	async function handBack(ref: string, cwd: string, delegate: { id: string; teammate: string; lead: string; state: string; planTask: boolean }) {
+		const { lead } = delegate;
+		if (delegate.planTask) {
+			const issue = JSON.parse(await kata(["show", ref, "--json"], cwd)).issue;
+			if (issue.status === "open" && issue.metadata?.teammate === delegate.teammate) {
+				await kata(lead ? ["meta", "set", ref, "teammate", lead, "--if-match", String(issue.revision)] : ["meta", "unset", ref, "teammate", "--if-match", String(issue.revision)], cwd);
+				await kata(["meta", "set", ref, "todo.status", "pending"], cwd);
+				await kata(["meta", "unset", ref, `${namespace}.subagent_id`], cwd);
+			}
+		}
+		await kata(["label", "add", ref, "needs-review"], cwd);
+		await kata(["notify", ref, "--to", `${await actor(cwd)}${lead ? `/${lead}` : ""}`, "--message", `Subagent ${delegate.id} ${delegate.state} without closing ${ref}; review it, then close or reassign it.`], cwd);
+	}
+
 	async function remove(task: Task, change: Change, cwd: string): Promise<void> {
 		if (plan.local) { plan.tasks = plan.tasks.filter(t => t !== task); return; }
 		if (OPEN.has(task.status)) {
@@ -576,10 +613,8 @@ export function createKataCore(host: CoreHost, options: CoreOptions) {
 
 	// With no active task, start the earliest pending one (phase order).
 	async function advance(cwd: string): Promise<void> {
-		// A delegated task is the subagent's; it never occupies the lead's slot.
-		const own = (t: Task) => !t.delegated && !host.isDelegated?.(t.ref);
-		if (plan.tasks.some(t => t.status === "in_progress" && own(t))) return;
-		const next = phasesOf(plan.tasks).flatMap(p => p.tasks).find(t => t.status === "pending" && own(t));
+		if (plan.tasks.some(t => t.status === "in_progress" && leads(t))) return;
+		const next = phasesOf(plan.tasks).flatMap(p => p.tasks).find(t => t.status === "pending" && leads(t));
 		if (next) await transition(next, "in_progress", {}, cwd);
 	}
 
@@ -590,8 +625,10 @@ export function createKataCore(host: CoreHost, options: CoreOptions) {
 			return tasks;
 		}
 		if (!target) {
-			const active = plan.tasks.find(t => t.status === "in_progress" && !t.delegated && !host.isDelegated?.(t.ref));
-			if (fallback === "active" && active) return [active];
+			// Never guess between two active tasks: closing one closes it with this evidence.
+			const active = plan.tasks.filter(t => t.status === "in_progress" && leads(t));
+			if (fallback === "active" && active.length === 1) return active;
+			if (fallback === "active" && active.length > 1) throw new Error(`Several tasks are in progress (${active.map(t => `"${t.content}"`).join(", ")}); name the task.`);
 			throw new Error("Name the task (verbatim content or Kata ref).");
 		}
 		const exact = plan.tasks.filter(t => t.content === target || t.ref === target || t.ref.split("#")[1] === target);
@@ -783,7 +820,7 @@ export function createKataCore(host: CoreHost, options: CoreOptions) {
 				const [task] = resolve(params.task, undefined, "none");
 				if (!OPEN.has(task.status)) await reopenParent();
 				if (task.status === "blocked") throw new Error(`"${task.content}" is blocked; unblock it first.`);
-				for (const other of plan.tasks) if (other !== task && other.status === "in_progress" && !other.delegated && !host.isDelegated?.(other.ref)) await transition(other, "pending", {}, cwd);
+				for (const other of plan.tasks) if (other !== task && other.status === "in_progress" && leads(other)) await transition(other, "pending", {}, cwd);
 				await transition(task, "in_progress", change, cwd);
 				break;
 			}
@@ -945,7 +982,7 @@ export function createKataCore(host: CoreHost, options: CoreOptions) {
 		get cache() { return cache; },
 		stateEntry: STATE_ENTRY,
 		resetReminders() { reminders = 0; },
-		debug, bounded, serial, kata, actor, owned, work, load, refresh, probe, bind,
+		debug, bounded, serial, kata, actor, owned, work, load, refresh, probe, bind, handBack,
 		ensureParent, adopt, reconcile, drainRetries, apply, execute, command,
 		observeToolResult, remind, warm,
 	};

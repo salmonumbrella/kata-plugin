@@ -490,6 +490,7 @@ test("an unrelated delegation never takes the lead's active task", async () => {
 });
 
 test("a finished delegate that leaves its plan task open hands it back for review", async () => {
+  process.env.KATA_TEAMMATE = "lead-mate";
   const app = host(); await app.event("session_start");
   const ref = await app.init(["Implement widget", "Write widget tests"]);
   await app.event("tool_call", { toolName: "task", toolCallId: "handback", input: { name: "WriteTests", task: "Write the widget tests" } });
@@ -503,8 +504,9 @@ test("a finished delegate that leaves its plan task open hands it back for revie
   await app.call({ op: "view" });
   const settled = await show(`v2test#${task.short_id}`);
   expect(settled.labels.some((l: any) => l.label === "needs-review")).toBe(true);
-  expect(settled.issue.metadata.teammate).toBeUndefined();
-  expect(Object.keys(settled.issue.metadata).some(key => key.startsWith("notify."))).toBe(true);
+  expect(settled.issue.metadata.teammate).toBe("lead-mate");
+  expect(settled.issue.metadata["todo.status"]).toBe("pending");
+  expect((await kata(["inbox", "--for", "v2-builder/lead-mate", "--json"])).requests.some((r: any) => r.ref.endsWith(task.short_id))).toBe(true);
   expect((await app.call({ op: "done", task: "Write widget tests", message, evidence })).isError).toBeUndefined();
   const closed = await show(`v2test#${task.short_id}`);
   expect(closed.issue.status).toBe("closed");
@@ -562,4 +564,28 @@ test("a handed-back plan task can be delegated again", async () => {
   const children = (await show(ref)).children;
   expect(children).toHaveLength(2);
   expect(children.find((c: any) => c.title === "Write gadget tests").metadata["omp.subagent_id"]).toBe("regadget-2");
+});
+
+test("after a hand-back, a bare done closes the lead's own active task", async () => {
+  const app = host(); await app.event("session_start");
+  const ref = await app.init(["Write widget tests", "Implement widget"]);
+  await app.event("tool_call", { toolName: "task", toolCallId: "bare-done", input: { task: 'Complete "Write widget tests"' } });
+  const sessionFile = `${scratch}/bare-done.jsonl`;
+  app.emit("task:subagent:lifecycle", { id: "bare-done", status: "started", sessionFile, parentToolCallId: "bare-done", index: 0 });
+  await app.call({ op: "view" });
+  expect((await app.call({ op: "start", task: "Implement widget" })).isError).toBeUndefined();
+  app.emit("task:subagent:lifecycle", { id: "bare-done", status: "completed", sessionFile });
+  await app.call({ op: "view" });
+  expect((await app.call({ op: "done", message, evidence })).isError).toBeUndefined();
+  const children = (await show(ref)).children;
+  expect(children.find((c: any) => c.title === "Implement widget").status).toBe("closed");
+  expect(children.find((c: any) => c.title === "Write widget tests").status).toBe("open");
+});
+
+test("a task call that never spawns releases its plan task", async () => {
+  const app = host(); await app.event("session_start"); await app.init(["Write gizmo tests"]);
+  const input = { task: 'Complete "Write gizmo tests"' };
+  expect(await app.event("tool_call", { toolName: "task", toolCallId: "denied", input })).toBeUndefined();
+  await app.event("tool_result", { toolName: "task", toolCallId: "denied", isError: true, input });
+  expect(await app.event("tool_call", { toolName: "task", toolCallId: "retry", input })).toBeUndefined();
 });

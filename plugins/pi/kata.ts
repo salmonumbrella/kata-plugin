@@ -124,19 +124,21 @@ export default async function piKata(pi: ExtensionAPI) {
 		// Any open child may be named; plan tasks and other children also match by content.
 		const children = (shown.children ?? []).filter((c: any) => c.status === "open");
 		const refOf = (c: any) => c.qualified_id || `${binding.parent.split("#")[0]}#${c.short_id}`;
+		const actor = await core.actor(binding.workspace), lead = inherited.teammate;
+		// Another delegate's issue, or one another writer owns, is never a candidate.
+		const foreign = (c: any) => !!(c.metadata?.["pi.subagent_id"] || c.metadata?.["omp.subagent_id"]) ||
+			(!!c.owner && (c.owner !== actor || ![lead, teammate].includes(c.metadata?.teammate || "")));
 		const tasks: Task[] = children.map((c: any) => ({ ref: refOf(c), content: c.title, phase: c.metadata?.["todo.phase"] ?? "",
-			status: ["in_progress", "blocked"].includes(c.metadata?.["todo.status"]) ? c.metadata["todo.status"] : "pending",
-			delegated: !!(c.metadata?.["pi.subagent_id"] || c.metadata?.["omp.subagent_id"]) }));
+			status: ["in_progress", "blocked"].includes(c.metadata?.["todo.status"]) ? c.metadata["todo.status"] : "pending", delegated: foreign(c) }));
+		const restored = (ctx.sessionManager.getBranch() as any[]).filter(e => e.type === "custom" && e.customType === "io.kata.pi.delegate" && e.data?.id === id).at(-1)?.data;
+		// A taken task the prompt names binds nothing else: the child gets its own issue.
 		const match = matchDelegation(tasks, prompt);
 		const selected = match && children.find((c: any) => refOf(c) === match.ref);
 		const key = `pi-agent:${inherited.sessionId}:${id}`;
-		const restored = (ctx.sessionManager.getBranch() as any[]).filter(e => e.type === "custom" && e.customType === "io.kata.pi.delegate" && e.data?.id === id).at(-1)?.data;
 		let ref: string, restore: Restore | undefined;
 		if (restored?.ref) { ref = restored.ref; restore = restored.restore; }
 		else if (selected) {
 			ref = selected.qualified_id || `${binding.parent.split("#")[0]}#${selected.short_id}`;
-			if (selected.metadata?.["pi.subagent_id"] && selected.metadata["pi.subagent_id"] !== id) throw new Error(`Plan task ${ref} is already delegated.`);
-			if (selected.owner && (selected.owner !== await core.actor(binding.workspace) || ![inherited.teammate, teammate].includes(selected.metadata?.teammate || ""))) throw new Error(`Plan task ${ref} belongs to another writer.`);
 			restore = { teammate: selected.metadata?.teammate, status: selected.metadata?.["todo.status"], attention: selected.metadata?.["work.attention"], claimed: !selected.owner };
 			let revision = selected.revision;
 			// A claim records only the owner; the teammate is separate metadata.
@@ -146,7 +148,7 @@ export default async function piKata(pi: ExtensionAPI) {
 			await core.kata(["meta", "set", ref, "todo.status", "in_progress"], binding.workspace);
 		} else {
 			const out = JSON.parse(await core.kata(["create", `Subagent ${id}`, "--parent", binding.parent, "--project", binding.parent.split("#")[0],
-				"--body", `Delegated Pi work. The child must close this issue with its verification evidence.`, "--owner", await core.actor(binding.workspace), "--teammate", teammate,
+				"--body", `Delegated Pi work. The child must close this issue with its verification evidence.`, "--owner", actor, "--teammate", teammate,
 				"--meta", `pi.subagent_id=${id}`, "--meta", `pi.session_id=${inherited.sessionId}`, "--idempotency-key", key, "--force-new", "--json"], binding.workspace));
 			if (!out.issue?.short_id) throw new Error("kata create returned no child identity");
 			ref = `${binding.parent.split("#")[0]}#${out.issue.short_id}`;
@@ -263,8 +265,10 @@ export default async function piKata(pi: ExtensionAPI) {
 		if (inherited?.provider && inherited.model) {
 			const inherit = inheritsModel(process.argv);
 			const model = inherit.model ? ctx.modelRegistry?.find(inherited.provider, inherited.model) : undefined;
-			if (model && (ctx.model?.provider !== model.provider || ctx.model?.id !== model.id)) await pi.setModel(model).catch(core.debug);
-			if (inherit.model && inherit.thinking && inherited.thinking) pi.setThinkingLevel(inherited.thinking as any);
+			const same = !!model && ctx.model?.provider === model.provider && ctx.model?.id === model.id;
+			const switched = same || (!!model && await pi.setModel(model).catch(error => { core.debug(error); return false; }));
+			// The parent's thinking level only fits the parent's model.
+			if (switched && inherit.thinking && inherited.thinking) pi.setThinkingLevel(inherited.thinking as any);
 		}
 		isolateChildAttention(ctx, inherited ? undefined : explicit);
 		return bind(ctx);
@@ -275,38 +279,33 @@ export default async function piKata(pi: ExtensionAPI) {
 		await core.reconcile();
 	})));
 	// A child's shutdown is its last act; give its own issue cleanup time to finish.
-	pi.on("session_shutdown", (_event, ctx) => core.bounded(core.serial(async () => {
+	// A reload continues the same session, so it is not an ending.
+	pi.on("session_shutdown", (event, ctx) => core.bounded(core.serial(async () => {
 		await core.load(core.plan.workspace || ctx.cwd);
 		await core.drainRetries();
-		if (delegate) {
+		if (delegate && event?.reason !== "reload") {
 			const { ref, binding: { workspace }, restore } = delegate;
 			const view = JSON.parse(await core.kata(["show", ref, "--json"], workspace));
 			if (view.issue.status !== "open") return;
-			const lead = inherited?.teammate || "";
 			if (!toolCalls && delegate.fresh) {
 				// The child never acted (a failed login, a bare reply): leave no trace of it.
 				if (!restore) {
 					await core.kata(["close", ref, "--wontfix", "--message", `Pi child ${delegate.id} ended before running any tool, so it did no delegated work; nothing remains to review.`], workspace);
 					return;
 				}
+				// The subagent id goes last: a partial rollback leaves the task marked delegated.
 				let issue = await core.owned(ref, workspace);
 				issue = await core.work(ref, "work.attention", restore.attention, workspace, issue);
-				await core.kata(["meta", "unset", ref, "pi.subagent_id"], workspace);
 				await core.kata(restore.status ? ["meta", "set", ref, "todo.status", restore.status] : ["meta", "unset", ref, "todo.status"], workspace);
-				if (restore.claimed) await core.kata(["unassign", ref], workspace);
 				await core.kata(restore.teammate ? ["meta", "set", ref, "teammate", restore.teammate] : ["meta", "unset", ref, "teammate"], workspace);
+				if (restore.claimed) await core.kata(["unassign", ref], workspace);
+				await core.kata(["meta", "unset", ref, "pi.subagent_id"], workspace);
 				return;
 			}
-			await core.kata(["label", "add", ref, "needs-review"], workspace);
 			let issue = await core.owned(ref, workspace);
 			issue = await core.work(ref, "work.attention", "needs-human", workspace, issue);
 			await core.work(ref, "work.attention_msg", "Pi child ended without closing its issue; review its report and verification.", workspace, issue);
-			// Hand an unfinished plan task back to the lead, who may verify and close it.
-			if (restore) {
-				await core.kata(["meta", "unset", ref, "pi.subagent_id"], workspace);
-				await core.kata(lead ? ["meta", "set", ref, "teammate", lead] : ["meta", "unset", ref, "teammate"], workspace);
-			}
-			await core.kata(["notify", ref, "--to", `${await core.actor(workspace)}${lead ? `/${lead}` : ""}`, "--message", `Pi child ${delegate.id} ended without closing ${ref}; review it, then close or reassign it.`], workspace);
+			await core.handBack(ref, workspace, { id: delegate.id, teammate: delegate.teammate, lead: inherited?.teammate || "", state: "ended", planTask: !!restore });
 		}
 	}), delegate ? 3000 : 250));
 }

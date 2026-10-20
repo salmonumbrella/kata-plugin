@@ -436,7 +436,8 @@ test("a child that worked but left its plan task open hands it back for review",
   const view = await show(`pitest#${task.short_id}`);
   expect(view.labels.some((l: any) => l.label === "needs-review")).toBe(true);
   expect(view.issue.metadata.teammate).toBeUndefined();
-  expect(Object.keys(view.issue.metadata).some(key => key.startsWith("notify."))).toBe(true);
+  expect(view.issue.metadata["todo.status"]).toBe("pending");
+  expect((await kata(["inbox", "--for", "pi-builder", "--json"])).requests.some((r: any) => r.ref.endsWith(task.short_id))).toBe(true);
   expect((await parent.call({ op: "done", task: "Write handback fixture tests", message, evidence })).isError).toBeUndefined();
   const closed = await show(`pitest#${task.short_id}`);
   expect(closed.issue.status).toBe("closed");
@@ -485,4 +486,29 @@ test("a child keeps a teammate the lead chose for it", async () => {
 test("only commands that run pi count as child launches", () => {
   for (const command of ["pi -p x", "nohup env KATA_TEAMMATE=testwriter pi -p --no-session 'w' &", "./pi -p x", "/opt/homebrew/bin/pi -p", "cd w && pi -p y"]) expect(launchesPi(command)).toBe(true);
   for (const command of ["grep pi file", "rg pi plugins/", "which pi", "echo pi", "ls pi-dir", "pip install x"]) expect(launchesPi(command)).toBe(false);
+});
+
+test("a child reload keeps its binding", async () => {
+  const parent = await host(); await parent.event("session_start", { reason: "startup" });
+  const ref = await parent.init(["Implement reload fixture", "Write reload fixture tests"]);
+  const child = await childOf(parent);
+  await child.event("before_agent_start", { prompt: "Write reload fixture tests", systemPromptOptions: { sections: {} } });
+  await child.event("session_shutdown", { reason: "reload" });
+  const task = (await show(ref)).children.find((c: any) => c.title === "Write reload fixture tests");
+  expect(task.metadata["pi.subagent_id"]).toBe(child.sid);
+  expect(task.metadata.teammate).toBe(child.entries.find(e => e.customType === "io.kata.pi.delegate").data.teammate);
+  leaveChild();
+});
+
+test("a child never binds an issue another writer owns", async () => {
+  const parent = await host(); await parent.event("session_start", { reason: "startup" });
+  const ref = await parent.init(["Implement foreign fixture"]);
+  const foreign = (await kata(["create", "Write foreign fixture tests", "--parent", ref, "--force-new", "--json"])).issue.short_id;
+  await kata(["claim", foreign, "--as", "someone-else", "--json"]);
+  const child = await childOf(parent);
+  await child.event("before_agent_start", { prompt: "Write foreign fixture tests", systemPromptOptions: { sections: {} } });
+  const record = child.entries.find(e => e.customType === "io.kata.pi.delegate")?.data;
+  expect(record?.ref).toBeDefined();
+  expect(record.ref).not.toBe(`pitest#${foreign}`);
+  leaveChild();
 });

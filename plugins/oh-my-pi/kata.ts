@@ -12,7 +12,7 @@
 // participate in parent closure. Unbound folders use a session-local plan.
 
 import path from "node:path";
-import { createKataCore, DESCRIPTION, OPEN, sessionKey, render, matchDelegation,
+import { createKataCore, DESCRIPTION, sessionKey, render, matchDelegation, namedTask,
 	kataCommands as parseKataCommands, teammateFor, delegateCommand, delegateContext, type Binding } from "./kata-core";
 
 const EXECUTABLE = process.env.KATA_OMP_EXECUTABLE || "kata";
@@ -98,6 +98,7 @@ export default function ompKata(pi: any) {
 		const id = ctx.sessionManager?.getSessionId?.();
 		if (!id) return;
 		if (coordinator?.id === id) return coordinator;
+		if (coordinator) assignments.clear(); // a previous session's spawns
 		coordinator = {
 			id, records: new Map(),
 			prepare: record => serial(async () => {
@@ -109,7 +110,7 @@ export default function ompKata(pi: any) {
 				// existed when the task call was seen. Match against it now.
 				if (!record.planRef && (record.text || record.label)?.trim()) {
 					await load(binding.workspace);
-					record.planRef = matchDelegation(core.plan.tasks, record.text ?? "", reserved(record), record.single, record.label)?.ref;
+					record.planRef = matchDelegation(core.plan.tasks, record.text ?? "", { unavailable: reserved(record), single: record.single, label: record.label })?.ref;
 				}
 				if (record.planRef) {
 					const ref = record.planRef;
@@ -145,18 +146,10 @@ export default function ompKata(pi: any) {
 		const view = JSON.parse(await kata(["show", record.ref, "--json"], cwd));
 		if (view.issue.status !== "closed") {
 			// Only observation metadata belongs to the parent; delegate work.* stays untouched.
-			let revision = view.issue.revision;
-			if (view.issue.metadata?.["omp.status"] !== record.state) { await kata(["meta", "set", record.ref, "omp.status", record.state, "--if-match", String(revision)], cwd); revision++; }
-			// Hand an unfinished plan task back to the lead, who may verify and close it.
-			const lead = process.env.KATA_TEAMMATE || "";
-			if (record.planRef && view.issue.metadata?.teammate === record.teammate) {
-				await kata(lead ? ["meta", "set", record.ref, "teammate", lead, "--if-match", String(revision)] : ["meta", "unset", record.ref, "teammate", "--if-match", String(revision)], cwd);
-				await kata(["meta", "unset", record.ref, "omp.subagent_id"], cwd);
-			}
-			await kata(["label", "add", record.ref, "needs-review"], cwd);
+			if (view.issue.metadata?.["omp.status"] !== record.state) await kata(["meta", "set", record.ref, "omp.status", record.state, "--if-match", String(view.issue.revision)], cwd);
 			await kata(["comment", record.ref, "--idempotency-key", `omp-settle:${record.coordinator.id}:${record.id}:${record.state}`,
 				"--body", `Subagent ${record.id} ${record.state} without closing its Kata issue. Review the work and supply evidence before closing.`], cwd);
-			await kata(["notify", record.ref, "--to", `${await actor(cwd)}${lead ? `/${lead}` : ""}`, "--message", `Subagent ${record.id} ${record.state} without closing ${record.ref}; review it, then close or reassign it.`], cwd);
+			await core.handBack(record.ref, cwd, { id: record.id, teammate: record.teammate, lead: process.env.KATA_TEAMMATE || "", state: record.state, planTask: !!record.planRef });
 		}
 		record.reported = record.state;
 	}
@@ -239,10 +232,9 @@ export default function ompKata(pi: any) {
 				await load(core.plan.workspace!);
 				const taken = reserved();
 				assignment.refs = texts.map((text, index) => {
-					const full = `${labels[index]}\n${text}`;
-					const named = core.plan.tasks.filter(task => OPEN.has(task.status) && (full.includes(task.content) || full.includes(task.ref)));
-					if (named.length === 1 && (taken.has(named[0].ref) || named[0].delegated)) throw new Error(`Plan task ${named[0].ref} is already delegated.`);
-					const selected = matchDelegation(core.plan.tasks, text, taken, texts.length === 1, labels[index]);
+					const named = namedTask(core.plan.tasks, `${labels[index]}\n${text}`);
+					if (named && (taken.has(named.ref) || named.delegated)) throw new Error(`Plan task ${named.ref} is already delegated.`);
+					const selected = matchDelegation(core.plan.tasks, text, { unavailable: taken, single: texts.length === 1, label: labels[index] });
 					if (selected) taken.add(selected.ref);
 					return selected?.ref;
 				});
@@ -257,7 +249,13 @@ export default function ompKata(pi: any) {
 		catch (error) { return { block: true, reason: String(error) }; }
 	});
 
-	pi.on("tool_result", (event: any, ctx: any) => core.observeToolResult(event, ctx));
+	pi.on("tool_result", (event: any, ctx: any) => {
+		// Started delegates hold their own tasks; a denied or partial spawn releases
+		// the rest. The text stays for a delegate whose start is reported late.
+		const assignment = event.toolName === "task" ? assignments.get(event.toolCallId) : undefined;
+		if (assignment) assignment.refs = undefined;
+		return core.observeToolResult(event, ctx);
+	});
 	pi.on("session_stop", async (event: any, ctx: any) => {
 		const additionalContext = await core.remind(event.messages ?? [], ctx);
 		if (additionalContext) return { continue: true, additionalContext };
