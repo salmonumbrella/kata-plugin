@@ -54,7 +54,7 @@ export default function ompKata(pi: any) {
 	const warm = (ctx: any) => core.warm(ctx, self(ctx)?.binding?.workspace || ctx.cwd);
 	pi.registerTool({
 		name: "todo",
-		label: "Todo (Kata)",
+		label: "Todo (kata カタ)",
 		description: DESCRIPTION,
 		approval: "read",
 		parameters: z.object({
