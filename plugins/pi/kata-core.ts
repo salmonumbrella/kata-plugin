@@ -23,7 +23,7 @@ export interface CoreOptions {
 }
 
 export type Status = "pending" | "in_progress" | "completed" | "abandoned" | "blocked";
-export type Task = { ref: string; content: string; phase: string; status: Status; blocker?: string; delegated?: boolean };
+export type Task = { ref: string; content: string; phase: string; status: Status; blocker?: string; delegated?: boolean; review?: boolean };
 export type Binding = { parent: string; workspace: string; sessionId?: string; auto?: boolean };
 export type Plan = Partial<Binding> & { tasks: Task[]; local?: boolean };
 export type Change = { message?: string; evidence?: string[]; reason?: string; many?: boolean; remove?: boolean };
@@ -339,6 +339,7 @@ export function createKataCore(host: CoreHost, options: CoreOptions) {
 					content: c.title,
 					phase: meta["todo.phase"],
 					delegated: !!(meta["omp.subagent_id"] || meta["pi.subagent_id"]) && (meta.teammate || "") !== (process.env.KATA_TEAMMATE || ""),
+					review: (c.labels ?? []).some((l: any) => (typeof l === "string" ? l : l?.label) === "needs-review"),
 					status,
 					blocker: status === "blocked" ? meta["work.attention_msg"] : undefined,
 				};
@@ -526,6 +527,8 @@ export function createKataCore(host: CoreHost, options: CoreOptions) {
 				for (const e of change.evidence) args.push("--evidence", e);
 				await closeTask(args, task, to, change, cwd);
 				await kata(["meta", "set", ref, "todo.status", "completed"], cwd);
+				// Kata accepted the close with evidence; an earlier review request is settled.
+				if (task.review) { await kata(["label", "rm", ref, "needs-review"], cwd); task.review = false; }
 				break;
 			}
 			case "abandoned":

@@ -45,7 +45,8 @@ export default function ompKata(pi: any) {
 		appendEntry: (...args) => pi.appendEntry(...args),
 		getSessionName: () => pi.getSessionName?.(),
 		isMain: main,
-		isDelegated: ref => [...(coordinator?.records.values() ?? [])].some(record => (record.ref || record.planRef) === ref),
+		// A finished delegate that left its task open hands it back once settled.
+		isDelegated: ref => [...(coordinator?.records.values() ?? [])].some(record => (record.ref || record.planRef) === ref && (record.state === "started" || record.reported !== record.state)),
 		beforeReconcile: syncSnapshots,
 		delegatedRunning: () => [...(coordinator?.records.values() ?? [])].some(record => record.state === "started" || !record.ref || record.ready) ||
 			(core.currentCtx?.getAsyncJobSnapshot?.()?.running ?? []).some((job: any) => job.type === "task"),
@@ -142,12 +143,19 @@ export default function ompKata(pi: any) {
 		if (!record.ref || !record.binding || record.state === "started" || record.reported === record.state) return;
 		const cwd = record.binding.workspace;
 		const view = JSON.parse(await kata(["show", record.ref, "--json"], cwd));
-		// Only observation metadata belongs to the parent; delegate work.* stays untouched.
-		if (view.issue.metadata?.["omp.status"] !== record.state) await kata(["meta", "set", record.ref, "omp.status", record.state, "--if-match", String(view.issue.revision)], cwd);
 		if (view.issue.status !== "closed") {
+			// Only observation metadata belongs to the parent; delegate work.* stays untouched.
+			let revision = view.issue.revision;
+			if (view.issue.metadata?.["omp.status"] !== record.state) { await kata(["meta", "set", record.ref, "omp.status", record.state, "--if-match", String(revision)], cwd); revision++; }
+			// Hand an unfinished plan task back to the lead, who may verify and close it.
+			const lead = process.env.KATA_TEAMMATE || "";
+			if (record.planRef && view.issue.metadata?.teammate === record.teammate) {
+				await kata(lead ? ["meta", "set", record.ref, "teammate", lead, "--if-match", String(revision)] : ["meta", "unset", record.ref, "teammate", "--if-match", String(revision)], cwd);
+			}
 			await kata(["label", "add", record.ref, "needs-review"], cwd);
-			const marker = `[omp:${record.coordinator.id}:${record.id}:${record.state}]`;
-			if (!(view.comments ?? []).some((c: any) => c.body?.includes(marker))) await kata(["comment", record.ref, "--body", `Subagent ${record.id} ${record.state} without closing its Kata issue. Review the work and supply evidence before closing. ${marker}`], cwd);
+			await kata(["comment", record.ref, "--idempotency-key", `omp-settle:${record.coordinator.id}:${record.id}:${record.state}`,
+				"--body", `Subagent ${record.id} ${record.state} without closing its Kata issue. Review the work and supply evidence before closing.`], cwd);
+			await kata(["notify", record.ref, "--to", `${await actor(cwd)}${lead ? `/${lead}` : ""}`, "--message", `Subagent ${record.id} ${record.state} without closing ${record.ref}; review it, then close or reassign it.`], cwd);
 		}
 		record.reported = record.state;
 	}

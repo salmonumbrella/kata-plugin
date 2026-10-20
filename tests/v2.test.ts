@@ -489,6 +489,28 @@ test("an unrelated delegation never takes the lead's active task", async () => {
   expect(children.find((c: any) => c.metadata?.["omp.subagent_id"] === "probe-agent").title).toBe("Subagent probe-agent");
 });
 
+test("a finished delegate that leaves its plan task open hands it back for review", async () => {
+  const app = host(); await app.event("session_start");
+  const ref = await app.init(["Implement widget", "Write widget tests"]);
+  await app.event("tool_call", { toolName: "task", toolCallId: "handback", input: { name: "WriteTests", task: "Write the widget tests" } });
+  const sessionFile = `${scratch}/handback.jsonl`;
+  app.emit("task:subagent:lifecycle", { id: "handback", status: "started", sessionFile, parentToolCallId: "handback", index: 0 });
+  await app.call({ op: "view" });
+  const task = (await show(ref)).children.find((c: any) => c.title === "Write widget tests");
+  expect(task.metadata["omp.subagent_id"]).toBe("handback");
+  expect((await app.call({ op: "done", task: "Write widget tests", message, evidence })).isError).toBe(true);
+  app.emit("task:subagent:lifecycle", { id: "handback", status: "completed", sessionFile });
+  await app.call({ op: "view" });
+  const settled = await show(`v2test#${task.short_id}`);
+  expect(settled.labels.some((l: any) => l.label === "needs-review")).toBe(true);
+  expect(settled.issue.metadata.teammate).toBeUndefined();
+  expect(Object.keys(settled.issue.metadata).some(key => key.startsWith("notify."))).toBe(true);
+  expect((await app.call({ op: "done", task: "Write widget tests", message, evidence })).isError).toBeUndefined();
+  const closed = await show(`v2test#${task.short_id}`);
+  expect(closed.issue.status).toBe("closed");
+  expect(closed.labels.some((l: any) => l.label === "needs-review")).toBe(false);
+});
+
 test("delegate teammates differ across sessions that reuse an agent name", async () => {
   const teammates: string[] = [];
   for (const n of [1, 2]) {
