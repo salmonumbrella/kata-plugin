@@ -521,3 +521,17 @@ test("delegate teammates differ across sessions that reuse an agent name", async
   }
   expect(teammates[0]).not.toBe(teammates[1]);
 });
+
+test("adopting an explicit parent retires an empty automatic parent", async () => {
+  const app = host(); await app.event("session_start");
+  await app.event("before_subagent_spawn", { agent: "task" });
+  const auto = (await app.call({ op: "view" })).details.kata.parent;
+  expect(auto).toMatch(/^v2test#/);
+  const explicit = await issue(); await kata(["claim", explicit, "--json"]);
+  await app.event("tool_result", { toolName: "bash", input: { command: `kata claim ${explicit}` }, isError: false, details: { exitCode: 0 } });
+  expect((await app.call({ op: "view" })).details.kata.parent).toBe(`v2test#${explicit}`);
+  const retired = await show(auto);
+  expect(retired.issue.status).toBe("closed");
+  expect(retired.issue.closed_reason).toBe("superseded");
+  expect((await show(explicit)).children ?? []).toHaveLength(0);
+});

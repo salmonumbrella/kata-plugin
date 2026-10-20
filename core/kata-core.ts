@@ -437,7 +437,13 @@ export function createKataCore(host: CoreHost, options: CoreOptions) {
 	async function adopt(ref: string, ctx: any, workspace = ctx.cwd) {
 		const parent = await pin(ref, workspace);
 		if (plan.auto && plan.parent && plan.parent !== parent) {
-			await kata(["edit", plan.parent, "--parent", parent], plan.workspace!);
+			// An automatic parent with no children only marks the session; retire it
+			// rather than leave an empty child that can never auto-close.
+			const shown = JSON.parse(await kata(["show", plan.parent, "--json"], plan.workspace!));
+			if (shown.issue.status === "open" && !shown.children?.length) {
+				autoParents.delete(plan.parent);
+				await kata(["close", plan.parent, "--superseded-by", parent, "--message", `This session adopted ${parent} as its plan parent.`], plan.workspace!);
+			} else await kata(["edit", plan.parent, "--parent", parent], plan.workspace!);
 		}
 		if (plan.parent === parent) autoParents.delete(parent);
 		setParent({ parent, workspace: path.resolve(workspace), sessionId: ctx.sessionManager?.getSessionId?.(), auto: false });
