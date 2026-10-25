@@ -1,3 +1,4 @@
+import fc from "fast-check";
 import { afterAll, beforeAll, beforeEach, expect, test } from "bun:test";
 import { execFile } from "node:child_process";
 import { mkdirSync, mkdtempSync } from "node:fs";
@@ -32,6 +33,7 @@ const message = "Implemented this isolated fixture and verified its behavior wit
 function host(options: any = {}) {
   const sid = options.sid === null ? undefined : options.sid || `v2-${++sequence}`;
   let tool: any;
+  const contractReady = Promise.withResolvers<void>();
   const handlers = new Map<string, any>(), bus = new Map<string, any>();
   const entries: any[] = options.entries || [], calls: string[][] = [], notices: any[] = [], widgets: any[] = [];
   const schema: any = new Proxy(() => schema, { get: () => schema });
@@ -44,12 +46,17 @@ function host(options: any = {}) {
   };
   ompKata({ zod: schema, registerTool: (value: any) => tool = value, appendEntry: (customType: string, data: any) => entries.push({ type: "custom", customType, data }),
     on: (name: string, callback: any) => handlers.set(name, callback), events: { on: (name: string, callback: any) => bus.set(name, callback) },
-    async exec(file: string, args: string[], opts: any) { calls.push(args); return await options.before?.(args, opts) ?? run(args, opts.cwd, opts.timeout); },
+    async exec(file: string, args: string[], opts: any) {
+      calls.push(args);
+      const result = await options.before?.(args, opts) ?? await run(args, opts.cwd, opts.timeout);
+      if (args[0] === "agent-contract-hook") contractReady.resolve();
+      return result;
+    },
   });
-  return { ctx, sid, entries, calls, notices, widgets,
+  return { ctx, sid, entries, calls, notices, widgets, contractReady: contractReady.promise,
     event: async (name: string, data: any = {}, context: any = ctx) => handlers.get(name)?.(data, context),
     emit: (name: string, data: any) => bus.get(name)?.(data),
-    call: (params: any) => tool.execute("fixture", params, undefined, undefined, ctx),
+    call: (params: any, context: any = ctx) => tool.execute("fixture", params, undefined, undefined, context),
     async init(items = ["Implement fixture", "Verify fixture"]) { const result = await tool.execute("fixture", { op: "init", items }, undefined, undefined, ctx); expect(result.isError).toBeUndefined(); return result.details.kata.parent; },
   };
 }
@@ -163,6 +170,9 @@ test("spawn creates a teammate child; subagent gets verbatim contract and closes
   parent.emit("task:subagent:lifecycle", { id: "Build.Widget", agent: "task", status: "started", sessionFile });
   const child = host({ agent: { kind: "sub", id: "Build.Widget", parentId: parent.ctx.agent.id }, sessionFile });
   await child.event("session_start");
+  // Startup hooks deliberately return after 250ms; await the actual contract
+  // request before asserting the next prompt contains its completed cache.
+  await child.contractReady;
   const prompt = await child.event("before_agent_start", { systemPrompt: ["child base"] });
   await parent.call({ op: "view" });
   const tracked = (await show(ref)).children.find((c: any) => c.metadata?.["omp.subagent_id"] === "Build.Widget");
@@ -588,4 +598,213 @@ test("a task call that never spawns releases its plan task", async () => {
   expect(await app.event("tool_call", { toolName: "task", toolCallId: "denied", input })).toBeUndefined();
   await app.event("tool_result", { toolName: "task", toolCallId: "denied", isError: true, input });
   expect(await app.event("tool_call", { toolName: "task", toolCallId: "retry", input })).toBeUndefined();
+});
+
+// Hosted reads routinely take longer than the old one-second process deadline.
+test("hosted show lasting over one second completes todo init", async () => {
+  const ref = `v2test#${await issue()}`;
+  const app = host({ before: async (args: string[], opts: any) => {
+    if (args[0] !== "show") return;
+    if (opts.timeout < 1100) return { code: 0, killed: true, stdout: "", stderr: "" };
+  } });
+  const result = await app.call({ op: "init", ref, items: ["Slow hosted read"] });
+  expect(result.isError).toBeUndefined();
+  expect(result.details.kata.parent).toBe(ref);
+  expect((await show(ref)).children[0].title).toBe("Slow hosted read");
+});
+
+test("failed refresh never presents cached tasks as current and recovers on view", async () => {
+  let unavailable = false;
+  const app = host({ before: (args: string[]) => unavailable && args[0] === "show"
+    ? { code: 1, stdout: "", stderr: "hosted service unavailable" } : undefined });
+  const parent = await app.init(["Externally finished task"]);
+  const task = (await show(parent)).children[0];
+  await kata(["close", `v2test#${task.short_id}`, "--done", "--message", message, "--test", "external verification", "--json"]);
+  unavailable = true;
+  const failed = await app.call({ op: "view" });
+  expect(failed.isError).toBe(true);
+  expect(failed.content[0].text).toContain("hosted service unavailable");
+  expect(failed.content[0].text).not.toContain("0/1 done");
+  expect(failed.details.phases).toEqual([]);
+  expect(app.widgets.at(-1)[1]?.join(" ")).not.toContain("0/1 done");
+  unavailable = false;
+  const recovered = await app.call({ op: "view" });
+  expect(recovered.isError).toBeUndefined();
+  expect(recovered.details.phases[0].tasks[0].status).toBe("completed");
+});
+
+test("failed initial binding is retried by view without losing the hosted plan", async () => {
+  const original = host();
+  const parent = await original.init(["Recover bound plan"]);
+  let unavailable = true;
+  process.env.KATA_REF = parent;
+  const app = host({ before: (args: string[]) => unavailable && args[0] === "show"
+    ? { code: 0, killed: true, stdout: "", stderr: "" } : undefined });
+  await app.event("session_start");
+  const failed = await app.call({ op: "view" });
+  expect(failed.isError).toBe(true);
+  expect(failed.content[0].text).toContain("timed out");
+  expect(failed.content[0].text).not.toContain("No todo plan");
+  unavailable = false;
+  const recovered = await app.call({ op: "view" });
+  expect(recovered.details.kata.parent).toBe(parent);
+  expect(recovered.details.phases[0].tasks[0].content).toBe("Recover bound plan");
+});
+
+for (const source of ["parameter", "environment", "stored"]) test(`qualified ${source} binding stays authoritative outside the project workspace`, async () => {
+  const parent = `v2test#${await issue()}`;
+  if (source === "environment") process.env.KATA_REF = parent;
+  const app = host({ cwd: outside, ...(source === "stored" ? { entries: [{ type: "custom", customType: "io.kata.omp.parent", data: { parent, workspace: cwd } }] } : {}) });
+  await app.event("session_start");
+  const result = await app.call({ op: "init", ...(source === "parameter" ? { ref: parent } : {}), items: ["Hosted worker task"] });
+  expect(result.isError).toBeUndefined();
+  expect(result.details.kata.parent).toBe(parent);
+  expect(result.content[0].text).not.toContain("Session-local");
+  expect((await show(parent)).children[0].title).toBe("Hosted worker task");
+});
+
+test("an unavailable explicit hosted binding errors instead of creating a local plan", async () => {
+  const app = host({ cwd: outside });
+  const result = await app.call({ op: "init", ref: "v2test#zzzz", items: ["Never local"] });
+  expect(result.isError).toBe(true);
+  expect(result.content[0].text).not.toContain("Session-local");
+  expect(result.details.phases).toEqual([]);
+});
+
+test("tracked worker todo uses its assigned issue and teammate from an unbound worktree", async () => {
+  const lead = host();
+  const parent = await lead.init(["Implement worker task"]);
+  const sessionFile = `${scratch}/worker-todo.jsonl`;
+  lead.emit("task:subagent:lifecycle", { id: "worker-todo", status: "started", sessionFile });
+  await lead.call({ op: "view" });
+  const assigned = (await show(parent)).children.find((c: any) => c.metadata?.["omp.subagent_id"] === "worker-todo");
+  // The inherited coordinator reference must never become the worker's plan.
+  process.env.KATA_REF = parent;
+  const worker = host({ cwd: outside, sessionFile, agent: { kind: "sub", id: "worker-todo", parentId: lead.ctx.agent.id } });
+  const result = await worker.call({ op: "init", items: ["Verify assigned worker"] });
+  expect(result.isError).toBeUndefined();
+  expect(result.details.kata.parent).toBe(`v2test#${assigned.short_id}`);
+  const tasks = (await show(`v2test#${assigned.short_id}`)).children;
+  expect(tasks[0].title).toBe("Verify assigned worker");
+  expect(tasks[0].metadata.teammate).toBe(assigned.metadata.teammate);
+  expect((await worker.call({ op: "done", message, evidence })).isError).toBeUndefined();
+  expect((await show(`v2test#${tasks[0].short_id}`)).issue.status).toBe("closed");
+  expect((await show(parent)).issue.status).toBe("open");
+  expect(worker.widgets).toEqual([]);
+});
+
+for (const children of [0, {}, [null]]) test(`malformed hosted children ${JSON.stringify(children)} never expose a cached plan`, async () => {
+  let corrupt = false;
+  const app = host({ before: (args: string[]) => corrupt && args[0] === "show"
+    ? { code: 0, stdout: JSON.stringify({ issue: {}, children }), stderr: "" } : undefined });
+  await app.init(["Cached task"]);
+  corrupt = true;
+  const result = await app.call({ op: "view" });
+  expect(result.isError).toBe(true);
+  expect(result.details.phases).toEqual([]);
+  expect(result.content[0].text).not.toContain("0/1 done");
+});
+
+test("a pending stop-hook refresh does not describe cached tasks as current", async () => {
+  let outage = false;
+  const app = host({ before: async (args: string[]) => {
+    if (!outage || args[0] !== "show") return;
+    await new Promise(resolve => setTimeout(resolve, 400));
+    return { code: 1, stdout: "", stderr: "slow read outage" };
+  } });
+  await app.init(["Cached stop task"]);
+  outage = true;
+  expect(await app.event("session_stop", { messages: [] })).toBeUndefined();
+  await app.call({ op: "view" }); // drain the background hook
+});
+
+test("a sub identity cannot reuse the main adapter's bound session", async () => {
+  const app = host();
+  const parent = await app.init(["Main task"]);
+  const before = app.calls.length;
+  const result = await app.call({ op: "init", items: ["Foreign task"] }, { ...app.ctx, agent: { kind: "sub", id: "advisor" } });
+  expect(result.isError).toBe(true);
+  expect(app.calls.slice(before).some(a => ["create", "close", "meta"].includes(a[0]))).toBe(false);
+  expect((await show(parent)).children.map((c: any) => c.title)).toEqual(["Main task"]);
+});
+
+// Generated malformed response values must not turn the last good snapshot
+// into an authoritative response. {} is the named shrunk regression above.
+test("arbitrary non-array hosted children never expose cached state", async () => {
+  let children: unknown;
+  let corrupt = false;
+  const app = host({ before: (args: string[]) => corrupt && args[0] === "show"
+    ? { code: 0, stdout: JSON.stringify({ issue: {}, children }), stderr: "" } : undefined });
+  await app.init(["Property cached task"]);
+  corrupt = true;
+  await fc.assert(fc.asyncProperty(fc.jsonValue().filter(value => value !== null && !Array.isArray(value)), async value => {
+    children = value;
+    const result = await app.call({ op: "view" });
+    expect(result.isError).toBe(true);
+    expect(result.details.phases).toEqual([]);
+    expect(result.content[0].text).not.toContain("0/1 done");
+  }), { numRuns: 100, seed: 251025 });
+});
+
+test("a later init can replace a parameter-bound parent", async () => {
+  const first = `v2test#${await issue()}`, next = `v2test#${await issue()}`;
+  const app = host();
+  await app.call({ op: "init", ref: first, items: ["First plan"] });
+  const result = await app.call({ op: "init", ref: next, items: ["Next plan"] });
+  expect(result.details.kata.parent).toBe(next);
+  expect((await show(next)).children[0].title).toBe("Next plan");
+});
+
+test("view retries a failed parameter binding rather than reporting no plan", async () => {
+  const parent = `v2test#${await issue()}`;
+  let fail = true;
+  const app = host({ cwd: outside, before: (args: string[]) => fail && args[0] === "show" ? { code: 1, stdout: "", stderr: "read outage" } : undefined });
+  expect((await app.call({ op: "init", ref: parent, items: ["Pending init"] })).isError).toBe(true);
+  fail = false;
+  expect((await app.call({ op: "view" })).details.kata.parent).toBe(parent);
+});
+
+for (const error of ["project vault not found", "no project access: permission denied"]) test(`project error is never local fallback: ${error}`, async () => {
+  const app = host({ before: (args: string[]) => args[0] === "list" ? { code: 1, stdout: "", stderr: error } : undefined });
+  const result = await app.call({ op: "init", items: ["Hosted only"] });
+  expect(result.isError).toBe(true);
+  expect(result.content[0].text).not.toContain("Session-local");
+});
+
+test("bound worker fetches the contract with its exact hook arguments", async () => {
+  const lead = host();
+  await lead.init(["Lead contract task"]);
+  const sessionFile = `${scratch}/worker-contract.jsonl`;
+  lead.emit("task:subagent:lifecycle", { id: "worker-contract", status: "started", sessionFile });
+  await lead.call({ op: "view" });
+  const worker = host({ sessionFile, agent: { kind: "sub", id: "worker-contract" }, before: (args: string[]) => {
+    // Kata's hook contract requires the source selector without extra flags.
+    if (args[0] === "agent-contract-hook" && args.length !== 3) return { code: 0, stdout: "", stderr: "" };
+  } });
+  expect((await worker.call({ op: "init", items: ["Worker contract task"] })).isError).toBeUndefined();
+  await worker.event("before_agent_start", { systemPrompt: [] });
+  await worker.contractReady;
+  const prompt = await worker.event("before_agent_start", { systemPrompt: [] });
+  const contract = JSON.parse((await run(["agent-contract-hook", "--source", "kata-agent-contract-hook"])).stdout).hookSpecificOutput.additionalContext;
+  expect(prompt.systemPrompt.join("\n")).toContain(contract);
+});
+
+test("worker binding reports the preparation error and recovers after it clears", async () => {
+  let unavailable = false;
+  const lead = host({ before: (args: string[]) => unavailable && args[0] === "create"
+    ? { code: 1, stdout: "", stderr: "delegation service permission denied" } : undefined });
+  const parent = await lead.init(["Lead error task"]);
+  unavailable = true;
+  const sessionFile = `${scratch}/worker-error.jsonl`;
+  lead.emit("task:subagent:lifecycle", { id: "worker-error", status: "started", sessionFile });
+  await lead.call({ op: "view" });
+  const worker = host({ sessionFile, agent: { kind: "sub", id: "worker-error" } });
+  const failed = await worker.call({ op: "init", items: ["Worker error task"] });
+  expect(failed.isError).toBe(true);
+  expect(failed.content[0].text).toContain("delegation service permission denied");
+  expect((await show(parent)).children).toHaveLength(1);
+  unavailable = false;
+  const recovered = await worker.call({ op: "init", items: ["Worker error task"] });
+  expect(recovered.isError).toBeUndefined();
+  expect(recovered.content[0].text).not.toContain("permission denied");
 });
