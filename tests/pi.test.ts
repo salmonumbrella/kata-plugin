@@ -346,7 +346,9 @@ test("clearing child KATA_REF preserves explicit main binding precedence", async
   const app=await host(); await app.event("session_start",{reason:"startup"});
   expect(process.env.KATA_REF).toBeUndefined();
   const result=await app.call({op:"init",ref:second,items:["Remain with explicit binding"]});
-  expect(result.isError).toBeUndefined(); expect(result.details.kata.parent).toBe(`pitest#${first}`);
+  expect(result.isError).toBe(true); expect(result.details.kata.parent).toBe(`pitest#${first}`);
+  expect((await show(first)).children ?? []).toHaveLength(0);
+  expect((await show(second)).children ?? []).toHaveLength(0);
 });
 
 test("saved child resumes its teammate and binding without inherited environment", async () => {
@@ -511,5 +513,23 @@ test("a child never binds an issue another writer owns", async () => {
   const record = child.entries.find(e => e.customType === "io.kata.pi.delegate")?.data;
   expect(record?.ref).toBeDefined();
   expect(record.ref).not.toBe(`pitest#${foreign}`);
+  leaveChild();
+});
+
+test("Pi child recovers an automatic parent from a replay create envelope", async () => {
+  process.env.KATA_PI_PARENT = JSON.stringify({ pid: process.pid + 1, sessionId: `replay-lead-${++sequence}`, workspace: cwd, teammate: "lead" });
+  const child = await host({ before: async (args: string[], opts: any) => {
+    if (args[0] !== "create" || !args.includes("pi-session")) return;
+    // Execute the real idempotent create twice: the second response carries original_event.
+    const first = await run(args, opts.cwd); expect(first.code).toBe(0);
+    return run(args, opts.cwd);
+  } });
+  await child.event("session_start", { reason: "startup" });
+  const prompt: any = { prompt: "An independent replay child task", systemPromptOptions: { sections: {} } };
+  await child.event("before_agent_start", prompt);
+  const record = child.entries.find(e => e.customType === "io.kata.pi.delegate")?.data;
+  expect(record).toBeDefined();
+  expect((await show(record.binding.parent)).issue.metadata["pi.auto_parent"]).toBe(true);
+  expect(prompt.systemPromptOptions.sections.kata_binding).toContain(record.ref);
   leaveChild();
 });

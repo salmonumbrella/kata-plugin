@@ -130,12 +130,13 @@ test("id-less session never creates an unknown automatic parent", async () => {
   expect(app.calls.some(a => a[0] === "create")).toBe(false);
 });
 
-test("successful standalone main claim adopts an existing auto parent", async () => {
+test("successful standalone main claim preserves a populated auto parent relationship", async () => {
   const app = host(); const auto = await app.init(); const explicit = await issue();
   await kata(["claim", explicit, "--json"]);
   await app.event("tool_result", { toolName: "bash", input: { command: `kata claim ${explicit}` }, isError: false, details: { exitCode: 0 } });
   expect((await app.call({ op: "view" })).details.kata.parent).toBe(`v2test#${explicit}`);
-  expect((await show(explicit)).children.some((c: any) => c.short_id === auto.split("#")[1])).toBe(true);
+  expect((await show(explicit)).children ?? []).toHaveLength(0);
+  expect((await show(auto)).issue.status).toBe("open");
 });
 
 test("contract is cached verbatim, inbox cached, slow hooks bounded and failures quiet", async () => {
