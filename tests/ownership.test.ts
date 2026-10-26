@@ -47,7 +47,7 @@ async function set(ref: string, key: string, value: string) { await kata(["meta"
 async function claim(ref: string, actor = "actor-a") { await kata(["claim", ref, "--as", actor, "--json"]); }
 
 type Before = (args: string[]) => Promise<any>;
-function host(parent: string, before?: Before) {
+function host(parent: string | undefined, before?: Before) {
   let tool: any;
   const events = new Map<string, any>();
   const calls: string[][] = [];
@@ -56,7 +56,7 @@ function host(parent: string, before?: Before) {
   const ctx = {
     cwd,
     agent: { kind: "main", id: "ownership-main" },
-    sessionManager: { getSessionId: () => `ownership-${parent}`, getBranch: () => [{ type: "custom", customType: "io.kata.omp.parent", data: { parent } }] },
+    sessionManager: { getSessionId: () => `ownership-${parent}`, getBranch: () => parent ? [{ type: "custom", customType: "io.kata.omp.parent", data: { parent } }] : [] },
     ui: { notify: (message: string) => notices.push(message), setWidget() {} },
   };
   ompKata({
@@ -118,7 +118,7 @@ test("failed claim on an unowned task is reported before attention writes", asyn
 });
 test("failed parent claim is reported before creating or starting children", async () => {
   let parentRef: string | undefined;
-  const app = host("unused", async args => {
+  const app = host(undefined, async args => {
     if (!parentRef && args[0] === "claim") {
       parentRef = args[1];
       return { code: 1, stderr: "parent claim transport failed", stdout: "" };

@@ -20,7 +20,7 @@ export const kataCommands = (command: string) => parseKataCommands(command, EXEC
 
 type Delegate = {
 	id: string; teammate: string; sessionFile?: string; parentAgentId?: string;
-	state: string; planRef?: string; label?: string; text?: string; single?: boolean; ref?: string; binding?: Binding; ready?: Promise<void>; reported?: string;
+	state: string; planRef?: string; label?: string; text?: string; single?: boolean; ref?: string; binding?: Binding; ready?: Promise<void>; prepareError?: string; reported?: string;
 	coordinator: Coordinator;
 };
 type Coordinator = {
@@ -44,6 +44,14 @@ export default function ompKata(pi: any) {
 		appendEntry: (...args) => pi.appendEntry(...args),
 		getSessionName: () => pi.getSessionName?.(),
 		isMain: main,
+		async binding(ctx) {
+			if (main(ctx)) return;
+			const record = self(ctx);
+			if (!record) throw new Error("Kata worker binding unavailable; the coordinator must assign this session an issue before using todo.");
+			await prepare(record);
+			if (!record.ref || !record.binding) throw new Error(`Kata worker binding failed: ${record.prepareError || "no issue was assigned"}`);
+			return { ref: record.ref, workspace: record.binding.workspace, teammate: record.teammate };
+		},
 		// A finished delegate that left its task open hands it back once settled.
 		isDelegated: ref => [...(coordinator?.records.values() ?? [])].some(record => (record.ref || record.planRef) === ref && (record.state === "started" || record.reported !== record.state)),
 		beforeReconcile: syncSnapshots,
@@ -179,7 +187,11 @@ export default function ompKata(pi: any) {
 
 	function prepare(record: Delegate) {
 		if (record.ref || record.ready) return record.ready;
-		record.ready = record.coordinator.prepare(record).catch(debug).finally(() => { record.ready = undefined; });
+		record.prepareError = undefined;
+		record.ready = record.coordinator.prepare(record).catch(error => {
+			record.prepareError = error instanceof Error ? error.message : String(error);
+			debug(error);
+		}).finally(() => { record.ready = undefined; });
 		return record.ready;
 	}
 

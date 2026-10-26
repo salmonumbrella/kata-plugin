@@ -14,6 +14,7 @@ export interface CoreHost {
 	isDelegated?(ref: string): boolean;
 	beforeReconcile?(): Promise<void>;
 	delegatedRunning?(): boolean;
+	binding?(ctx: any): Promise<{ ref: string; workspace: string; teammate: string } | undefined>;
 }
 export interface CoreOptions {
 	namespace: string;
@@ -25,7 +26,7 @@ export interface CoreOptions {
 export type Status = "pending" | "in_progress" | "completed" | "abandoned" | "blocked";
 export type Task = { ref: string; content: string; phase: string; status: Status; blocker?: string; delegated?: boolean; review?: boolean };
 export type Binding = { parent: string; workspace: string; sessionId?: string; auto?: boolean };
-export type Plan = Partial<Binding> & { tasks: Task[]; local?: boolean };
+export type Plan = Partial<Binding> & { tasks: Task[]; local?: boolean; error?: string };
 export type Change = { message?: string; evidence?: string[]; reason?: string; many?: boolean; remove?: boolean };
 export function sessionKey(file: string, cwd: string): string {
 	const absolute = path.resolve(cwd, file);
@@ -230,6 +231,7 @@ export function phasesOf(tasks: Task[]): { name: string; tasks: Task[] }[] {
 }
 
 export function render(plan: Plan): string {
+	if (plan.error) return `Kata state unavailable${plan.parent ? ` for ${plan.parent}` : ""}: ${plan.error}. Use todo op=view to refresh.`;
 	if (!plan.parent && !plan.local) return "No todo plan. Use todo op=init.";
 	if (plan.tasks.length === 0) return `Kata parent ${plan.parent}: no tasks.`;
 	const done = plan.tasks.filter(t => t.status === "completed").length;
@@ -252,6 +254,12 @@ export function createKataCore(host: CoreHost, options: CoreOptions) {
 	let queue: Promise<unknown> = Promise.resolve();
 	let scope: "unknown" | "bound" | "local" = "unknown";
 	let currentId: string | undefined;
+	let bound = false;
+	let assignedRef: string | undefined;
+	let requestedRef: string | undefined;
+	let sessionTeammate: string | undefined;
+	let boundAgent: string | undefined;
+	const agentKey = (ctx: any) => JSON.stringify([ctx?.agent?.kind, ctx?.agent?.id]);
 	let currentCtx: any;
 	let reminders = 0;
 	let progressed = true;
@@ -279,11 +287,12 @@ export function createKataCore(host: CoreHost, options: CoreOptions) {
 		finally { clearTimeout(timer!); }
 	}
 
-	async function kata(args: string[], cwd: string, timeout = 1000, workspace = true): Promise<string> {
+	async function kata(args: string[], cwd: string, timeout = 120_000, workspace = true): Promise<string> {
+		if (sessionTeammate !== undefined && args[0] !== "agent-contract-hook") args = [...args, "--teammate", sessionTeammate];
 		const result = await host.exec(options.executable, workspace ? [...args, "--workspace", path.resolve(cwd)] : args, { cwd, timeout });
 		if (result.code !== 0 || result.killed) {
 			const detail = (result.stderr || result.stdout || "").trim().split("\n").slice(-3).join(" ");
-			throw new Error(`kata ${args[0]} failed${detail ? `: ${detail}` : ""}`);
+			throw new Error(`kata ${args[0]} ${result.killed ? `timed out after ${timeout}ms` : "failed"}${detail ? `: ${detail}` : ""}`);
 		}
 		return result.stdout;
 	}
@@ -306,7 +315,7 @@ export function createKataCore(host: CoreHost, options: CoreOptions) {
 	async function owned(ref: string, cwd: string, mayClaim = false, allowClosed = false): Promise<any> {
 		let issue = JSON.parse(await kata(["show", ref, "--json"], cwd)).issue;
 		const currentActor = await actor(cwd);
-		const teammate = process.env.KATA_TEAMMATE || "";
+		const teammate = sessionTeammate ?? process.env.KATA_TEAMMATE ?? "";
 		if (issue?.status !== "open" && !(allowClosed && issue?.status === "closed")) throw new Error(`Kata issue ${ref} is closed or unavailable; no work metadata was written.`);
 		const assignedTeammate = issue.metadata?.teammate || "";
 		if (assignedTeammate !== teammate && (issue.owner || assignedTeammate)) {
@@ -358,32 +367,42 @@ export function createKataCore(host: CoreHost, options: CoreOptions) {
 			plan.tasks = [];
 			return;
 		}
-		const shown = JSON.parse(await kata(["show", plan.parent, "--json"], cwd));
-		const children = (shown.children ?? []) as any[];
-		plan.tasks = children
-			.filter(c => typeof c?.metadata?.["todo.phase"] === "string" && c.metadata["todo.removed"] !== true)
-			.sort((a, b) => String(a.created_at).localeCompare(String(b.created_at)))
-			.map(c => {
-				const meta = c.metadata;
-				let status: Status;
-				if (c.status === "closed") status = c.closed_reason === "wontfix" || meta["todo.status"] === "abandoned" ? "abandoned" : "completed";
-				else status = ["in_progress", "blocked"].includes(meta["todo.status"]) ? meta["todo.status"] : "pending";
-				return {
-					ref: c.qualified_id || `${plan.parent!.split("#")[0]}#${c.short_id}`,
-					content: c.title,
-					phase: meta["todo.phase"],
-					delegated: !!(meta["omp.subagent_id"] || meta["pi.subagent_id"]) && (meta.teammate || "") !== (process.env.KATA_TEAMMATE || ""),
-					review: (c.labels ?? []).some((l: any) => (typeof l === "string" ? l : l?.label) === "needs-review"),
-					status,
-					blocker: status === "blocked" ? meta["work.attention_msg"] : undefined,
-				};
-			});
+		try {
+			const shown = JSON.parse(await kata(["show", plan.parent, "--json"], cwd));
+			const children = (shown.children ?? []) as any[];
+			if (!shown.issue || !Array.isArray(children) || children.some(c => !c || typeof c.title !== "string" || typeof c.short_id !== "string")) {
+				throw new Error("kata show returned an invalid issue or children response");
+			}
+			plan.tasks = children
+				.filter(c => typeof c?.metadata?.["todo.phase"] === "string" && c.metadata["todo.removed"] !== true)
+				.sort((a, b) => String(a.created_at).localeCompare(String(b.created_at)))
+				.map(c => {
+					const meta = c.metadata;
+					let status: Status;
+					if (c.status === "closed") status = c.closed_reason === "wontfix" || meta["todo.status"] === "abandoned" ? "abandoned" : "completed";
+					else status = ["in_progress", "blocked"].includes(meta["todo.status"]) ? meta["todo.status"] : "pending";
+					return {
+						ref: c.qualified_id || `${plan.parent!.split("#")[0]}#${c.short_id}`,
+						content: c.title,
+						phase: meta["todo.phase"],
+						delegated: !!(meta["omp.subagent_id"] || meta["pi.subagent_id"]) && (meta.teammate || "") !== (sessionTeammate ?? process.env.KATA_TEAMMATE ?? ""),
+						review: (c.labels ?? []).some((l: any) => (typeof l === "string" ? l : l?.label) === "needs-review"),
+						status,
+						blocker: status === "blocked" ? meta["work.attention_msg"] : undefined,
+					};
+				});
+			delete plan.error;
+		} catch (error) {
+			plan.error = (error as Error).message;
+			throw error;
+		}
 	}
 
 	function refresh(ctx: any) {
 		if (!main(ctx) || host.allowUI?.(ctx) === false) return;
 		const ui = ctx?.ui;
 		if (!ui?.setWidget) return;
+		if (plan.error) { ui.setWidget(WIDGET, [render(plan)]); return; }
 		if (!plan.parent || plan.tasks.length === 0) {
 			ui.setWidget(WIDGET, undefined);
 			return;
@@ -399,7 +418,7 @@ export function createKataCore(host: CoreHost, options: CoreOptions) {
 		if (scope !== "unknown") return scope === "bound";
 		try { await kata(["list", "--limit", "1", "--json"], cwd); scope = "bound"; return true; }
 		catch (error) {
-			if (/project_not_initialized|no \.kata\.toml|no project|not bound|not.*kata project|project.*not.*(found|resolved)|could not resolve project/i.test(String(error))) { scope = "local"; return false; }
+			if (/\bproject_not_initialized\b/.test(String(error))) { scope = "local"; return false; }
 			throw error;
 		}
 	}
@@ -422,7 +441,14 @@ export function createKataCore(host: CoreHost, options: CoreOptions) {
 	}
 
 	async function bind(ctx: any, explicit = options.explicitRef?.() ?? process.env.KATA_REF) {
-		if (!main(ctx)) return;
+		if (!main(ctx) && !host.binding) return;
+		bound = false;
+		boundAgent = agentKey(ctx);
+		const assigned = await host.binding?.(ctx);
+		sessionTeammate = assigned?.teammate;
+		explicit = assigned?.ref ?? explicit;
+		assignedRef = assigned?.ref;
+		requestedRef = explicit;
 		const id = ctx.sessionManager?.getSessionId?.();
 		currentId = id;
 		lastSnapshot = undefined;
@@ -441,15 +467,17 @@ export function createKataCore(host: CoreHost, options: CoreOptions) {
 			if (retries.size) scheduleRetry();
 			if (snapshot.plan?.local && !explicit) plan = structuredClone(snapshot.plan);
 		}
-		if (!await probe(ctx.cwd)) { await drainRetries(); refresh(ctx); return; }
 		let stored: any = snapshot?.plan?.parent ? snapshot.plan : undefined;
 		for (const entry of ctx.sessionManager?.getBranch?.() ?? []) {
 			if (entry?.type === "custom" && entry.customType === STATE_ENTRY && typeof entry.data?.parent === "string" && (!entry.data.sessionId || entry.data.sessionId === id)) stored = entry.data;
 		}
-		if (!explicit && !stored && id) stored = await sessionBinding(ctx);
+		if (!explicit && !stored) {
+			if (!await probe(ctx.cwd)) { await drainRetries(); bound = true; refresh(ctx); return; }
+			if (id) stored = await sessionBinding(ctx);
+		}
 		const parent = explicit || stored?.parent;
 		if (parent) {
-			const workspace = explicit ? path.resolve(ctx.cwd) : stored.workspace || path.resolve(ctx.cwd);
+			const workspace = assigned?.workspace || (explicit ? path.resolve(ctx.cwd) : stored.workspace || path.resolve(ctx.cwd));
 			const qualified = await pin(parent, workspace);
 			const issue = JSON.parse(await kata(["show", qualified, "--json"], workspace)).issue;
 			const auto = !explicit && stored?.auto !== false && issue.metadata?.[`${namespace}.auto_parent`] === true && issue.metadata?.[`${namespace}.session_id`] === id;
@@ -457,10 +485,12 @@ export function createKataCore(host: CoreHost, options: CoreOptions) {
 			await load(workspace);
 		}
 		await drainRetries();
+		bound = true;
 		refresh(ctx);
 	}
 
 	function setParent(binding: Binding) {
+		scope = "bound";
 		if (!binding.auto) autoParents.delete(binding.parent);
 		if (plan.parent === binding.parent && plan.workspace === binding.workspace && plan.auto === binding.auto) return;
 		plan = { ...binding, tasks: plan.parent === binding.parent ? plan.tasks : [] };
@@ -649,10 +679,14 @@ export function createKataCore(host: CoreHost, options: CoreOptions) {
 	}
 
 	async function ensureParent(params: any, ctx: any): Promise<string | undefined> {
-		if (!await probe(ctx.cwd)) { plan.local = true; return; }
-		const explicit = options.explicitRef?.() ?? process.env.KATA_REF;
-		if (explicit && (!plan.parent || plan.parent.split("#").pop() !== explicit.split("#").pop())) await adopt(explicit, ctx);
-		else if (params.ref && !explicit) await adopt(params.ref, ctx);
+		const explicit = assignedRef ?? options.explicitRef?.() ?? process.env.KATA_REF;
+		const target = explicit || params.ref;
+		if (target && ((!explicit && params.ref) || !plan.parent || (target.includes("#") ? plan.parent !== target : plan.parent.split("#").pop() !== target))) {
+			requestedRef = target;
+			try { await adopt(target, ctx); }
+			catch (error) { bound = false; throw error; }
+		}
+		if (!plan.parent && !await probe(ctx.cwd)) { plan.local = true; delete plan.error; return; }
 		// A Pi child may establish the session parent before the lead uses todo.
 		if (!plan.parent && !explicit && !params.ref) {
 			const recovered = await sessionBinding(ctx);
@@ -778,6 +812,7 @@ export function createKataCore(host: CoreHost, options: CoreOptions) {
 	// ---------------------------------------------------------------------- ops
 
 	async function apply(params: any, ctx: any): Promise<string> {
+		if (!bound || currentId !== ctx.sessionManager?.getSessionId?.()) await bind(ctx, options.explicitRef?.() ?? process.env.KATA_REF ?? params.ref ?? (!bound ? requestedRef : undefined));
 		currentCtx = ctx;
 		currentId ||= ctx.sessionManager?.getSessionId?.();
 		let cwd = plan.workspace || ctx.cwd;
@@ -860,7 +895,7 @@ export function createKataCore(host: CoreHost, options: CoreOptions) {
 		return {
 			op,
 			kata: { parent: plan.parent },
-			phases: phasesOf(plan.tasks).map(p => ({
+			phases: phasesOf(plan.error ? [] : plan.tasks).map(p => ({
 				name: p.name,
 				tasks: p.tasks.map(t => (t.blocker ? { content: t.content, status: t.status, blocker: t.blocker } : { content: t.content, status: t.status })),
 			})),
@@ -869,13 +904,19 @@ export function createKataCore(host: CoreHost, options: CoreOptions) {
 
 	async function execute(params: any, ctx: any) {
 		return serial(async () => {
+			if (boundAgent && boundAgent !== agentKey(ctx)) {
+				return { content: [{ type: "text" as const, text: "Kata agent identity changed; use this worker's own extension context." }], details: { op: params.op, kata: {}, phases: [] }, isError: true };
+			}
 			try {
-				if (!main(ctx)) throw new Error("The todo plan belongs to the main agent.");
+				if (!main(ctx) && !host.binding) throw new Error("The todo plan belongs to the main agent.");
 				const text = await apply(params, ctx);
 				return { content: [{ type: "text" as const, text }], details: details(params.op) };
 			} catch (err) {
-				// Kata may have applied part of a batch; show the state it actually holds.
-				await load(plan.workspace || ctx.cwd).catch(() => undefined);
+				// A failed initial binding has no authoritative plan to render yet.
+				if (!bound || !plan.parent && !plan.local) plan.error = (err as Error).message;
+				// Kata may have applied part of a batch. A failed reload marks the
+				// cached tasks unavailable instead of presenting them as current.
+				if (plan.parent) await load(plan.workspace || ctx.cwd).catch(debug);
 				return {
 					content: [{ type: "text" as const, text: `${(err as Error).message}\n\n${render(plan)}` }],
 					details: details(params.op),
@@ -931,7 +972,7 @@ export function createKataCore(host: CoreHost, options: CoreOptions) {
 			const workspace = path.resolve(event.input.cwd || ctx.cwd, parsed.value("--workspace") || ".");
 			const target = ref;
 			await bounded(serial(async () => {
-				if (!await probe(ctx.cwd) || plan.tasks.some(t => t.ref === target || t.ref.split("#")[1] === target)) return;
+				if (plan.tasks.some(t => t.ref === target || t.ref.split("#")[1] === target)) return;
 				await owned(target, workspace);
 				await adopt(target, ctx, workspace);
 			}));
@@ -940,7 +981,8 @@ export function createKataCore(host: CoreHost, options: CoreOptions) {
 
 	async function remind(messages: any[], ctx: any): Promise<string | undefined> {
 		if (!main(ctx)) return;
-		await bounded(serial(async () => { await load(plan.workspace || ctx.cwd); await drainRetries(); }));
+		const refreshed = await bounded(serial(async () => { await load(plan.workspace || ctx.cwd); await drainRetries(); return true; }));
+		if (!refreshed || plan.error) return;
 		const open = plan.tasks.filter(t => t.status === "pending" || t.status === "in_progress");
 		if (open.length === 0 || reminders >= MAX_REMINDERS || !progressed) return;
 		// Do not push past a question the assistant just asked the user.
