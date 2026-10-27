@@ -439,9 +439,13 @@ test("rejected append preserves a completed automatic parent and its foreign chi
   expect(await show(parent)).toEqual(before);
   expect(await show(ref)).toEqual(childBefore);
 });
-test("qualified lowercase UID selects the same task as its short reference", async () => {
-  const a = app(); await init(a); const ref = a.core.plan.tasks[0].ref, issue = await show(ref);
-  const result = await a.call({ ...done, task: `reliability-test#${issue.uid.toLowerCase()}` });
+for (const [name, title] of [
+  ["qualified lowercase UID", "First"],
+  ["verbatim UID-shaped title", "00000000000000000000000000"],
+  ["verbatim title ending in #UID", "Follow up kata#00000000000000000000000000"],
+]) test(`${name} selects the same task as its short reference`, async () => {
+  const a = app(); await init(a, [title, "Second"]); const ref = a.core.plan.tasks[0].ref, issue = await show(ref);
+  const result = await a.call({ ...done, task: title === "First" ? `reliability-test#${issue.uid.toLowerCase()}` : title });
   expect(result.isError, result.content[0].text).toBeUndefined();
   expect((await show(ref)).status).toBe("closed");
 });
