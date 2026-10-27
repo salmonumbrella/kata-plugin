@@ -5,8 +5,10 @@ import { mkdirSync, mkdtempSync } from "node:fs";
 import path from "node:path";
 import { promisify } from "node:util";
 import { assertIsolated } from "./isolation";
+import { isolatedKata } from "./kata-fixture";
 import ompKata from "../kata";
 assertIsolated();
+const exec = promisify(execFile);
 const binary = process.env.KATA_TEST_EXECUTABLE!;
 if (!binary || !path.isAbsolute(binary)) throw new Error("Set KATA_TEST_EXECUTABLE to the absolute Kata binary.");
 const scratch = mkdtempSync(path.join(process.env.KATA_TEST_ROOT!, "v2-"));
@@ -14,12 +16,7 @@ const cwd = path.join(scratch, "workspace"), outside = path.join(scratch, "outsi
 mkdirSync(cwd); mkdirSync(outside);
 const env = { ...process.env, KATA_HOME: path.join(scratch, "home"), KATA_AUTHOR: "v2-builder" };
 for (const key of ["KATA_SERVER", "KATA_DAEMON", "KATA_AUTH_TOKEN", "KATA_REF", "KATA_TEAMMATE", "KATA_INBOX_USER"]) delete env[key];
-const exec = promisify(execFile);
-async function run(args: string[], workspace = cwd, timeout = 5000) {
-  assertIsolated(env);
-  try { const out = await exec(binary, args, { env, cwd: workspace, timeout }); return { ...out, code: 0, killed: false }; }
-  catch (error: any) { return { stdout: error.stdout || "", stderr: error.stderr || error.message, code: error.code || 1, killed: !!error.killed }; }
-}
+const run = isolatedKata(binary, env, cwd, 5000);
 async function kata(args: string[], workspace = cwd): Promise<any> {
   const out = await run(args, workspace);
   if (out.code) throw new Error(out.stderr);
@@ -141,7 +138,7 @@ test("successful standalone main claim preserves a populated auto parent relatio
 
 test("contract is cached verbatim, inbox cached, slow hooks bounded and failures quiet", async () => {
   process.env.KATA_INBOX_USER = "v2-builder";
-  const app = host(); await app.event("session_start");
+  const app = host(); await app.event("session_start"); await app.contractReady;
   const first = await app.event("before_agent_start", { systemPrompt: ["base"] });
   const second = await app.event("before_agent_start", { systemPrompt: ["base"] });
   const contract = JSON.parse((await run(["agent-contract-hook", "--source", "kata-agent-contract-hook"])).stdout).hookSpecificOutput.additionalContext;
@@ -368,7 +365,7 @@ test("missing agent identity never grants main-session attention authority", asy
   expect(app.widgets).toEqual([]);
 });
 
-for (const entry of ["lazy", "titled", "subagent-first"]) test(`${entry} auto parent is typed before a failed attention claim and recoverable`, async () => {
+for (const entry of ["lazy", "titled", "subagent-first"]) test(`${entry} failed claim resumes the same parent and closes with accepted evidence`, async () => {
   let rejectClaim = true;
   const app = host({ before: (a: string[]) => a[0] === "claim" && rejectClaim ? { code: 1, stderr: "temporary claim failure", stdout: "" } : undefined });
   await app.event("session_start");
@@ -376,16 +373,29 @@ for (const entry of ["lazy", "titled", "subagent-first"]) test(`${entry} auto pa
   else await app.call({ op: "init", items: ["Recovered task"], ...(entry === "titled" ? { message: "A titled plan parent" } : {}) });
   await app.call({ op: "view" }); // drain the bounded spawn hook
   const list = (await kata(["list", "--status", "all", "--meta", `omp.session_id=${app.sid}`, "--json"])).issues;
-  const parent = list.find((i: any) => !i.metadata?.["todo.phase"]);
-  expect(parent.metadata["omp.auto_parent"]).toBe(true);
+  const parents = list.filter((i: any) => !i.metadata?.["todo.phase"]);
+  expect(parents).toHaveLength(1);
+  const parent = parents[0];
+  expect(parent.metadata["omp.auto_parent"]).toBeUndefined();
   expect(parent.metadata["omp.session_id"]).toBe(app.sid);
   expect(parent.metadata["omp.workspace"]).toBe(cwd);
   rejectClaim = false;
   const resumed = host({ sid: app.sid }); await resumed.event("session_start");
-  const ref = await resumed.init(["Recovered task"]);
+  const result = await resumed.call({ op: "init", items: ["Recovered task"] });
+  expect(result.isError, result.content[0].text).toBeUndefined();
+  const ref = result.details.kata.parent;
   expect(ref).toBe(`v2test#${parent.short_id}`);
+  const setup = await show(ref);
+  expect(setup.issue.metadata["omp.auto_parent"]).toBe(true);
+  expect(setup.issue.title).toBe(parent.title);
   expect((await resumed.call({ op: "done", message, evidence })).isError).toBeUndefined();
-  expect((await show(ref)).issue.status).toBe("closed");
+  const closed = await show(ref);
+  expect(closed.issue.status).toBe("closed");
+  expect(closed.children).toHaveLength(1);
+  expect(closed.children[0].status).toBe("closed");
+  const finalParents = (await kata(["list", "--status", "all", "--meta", `omp.session_id=${app.sid}`, "--json"])).issues.filter((i: any) => !i.metadata?.["todo.phase"]);
+  expect(finalParents).toHaveLength(1);
+  expect(finalParents[0].short_id).toBe(parent.short_id);
 });
 
 for (const match of ["active", "named"]) test(`delegation reuses the ${match} plan task with child-owned closure`, async () => {

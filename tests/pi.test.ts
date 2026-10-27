@@ -1,10 +1,9 @@
 import { afterAll, beforeAll, beforeEach, expect, test } from "bun:test";
-import { execFile } from "node:child_process";
 import { mkdirSync, mkdtempSync, realpathSync, readFileSync } from "node:fs";
 import path from "node:path";
-import { promisify } from "node:util";
 import { Value } from "typebox/value";
 import { assertIsolated } from "./isolation";
+import { isolatedKata } from "./kata-fixture";
 import piKata, { launchesPi } from "../plugins/pi/kata";
 assertIsolated();
 const binary = process.env.KATA_TEST_EXECUTABLE!;
@@ -14,12 +13,7 @@ const cwd = path.join(scratch, "workspace"), outside = path.join(scratch, "outsi
 mkdirSync(cwd); mkdirSync(outside);
 const env = { ...process.env, KATA_HOME: path.join(scratch, "home"), KATA_AUTHOR: "pi-builder" };
 for (const key of ["KATA_SERVER", "KATA_DAEMON", "KATA_AUTH_TOKEN", "KATA_REF", "KATA_TEAMMATE", "KATA_INBOX_USER", "KATA_PI_PARENT"]) delete env[key];
-const exec = promisify(execFile);
-async function run(args: string[], workspace = cwd, timeout = 5000) {
-  assertIsolated(env);
-  try { return { ...await exec(binary, args, { env, cwd: workspace, timeout }), code: 0, killed: false }; }
-  catch (error: any) { return { stdout: error.stdout || "", stderr: error.stderr || error.message, code: error.code || 1, killed: !!error.killed }; }
-}
+const run = isolatedKata(binary, env, cwd);
 async function kata(args: string[], workspace = cwd): Promise<any> {
   const out = await run(args, workspace);
   if (out.code) throw new Error(out.stderr);
@@ -34,6 +28,7 @@ const globalRegistry = globalThis as any;
 const previousRegistry = globalRegistry[nativeKey];
 async function host(options: any = {}) {
   const sid = options.sid || `pi-${++sequence}`;
+  const contractReady = Promise.withResolvers<void>(), inboxReady = Promise.withResolvers<void>();
   let tool: any;
   const handlers = new Map<string, any>(), commands = new Map<string, any>();
   const entries: any[] = options.entries || [], calls: string[][] = [], notices: any[] = [], widgets: any[] = [], messages: any[] = [], models: any[] = [], thinking: any[] = [];
@@ -54,7 +49,13 @@ async function host(options: any = {}) {
     getThinkingLevel: () => options.thinking,
     setThinkingLevel: (level: any) => thinking.push(level),
     on: (name: string, callback: any) => handlers.set(name, [...(handlers.get(name) || []), callback]),
-    async exec(_file: string, args: string[], opts: any) { calls.push(args); return await options.before?.(args, opts) ?? run(args, opts.cwd, opts.timeout); },
+    async exec(_file: string, args: string[], opts: any) {
+      calls.push(args);
+      const result = await options.before?.(args, opts) ?? await run(args, opts.cwd, opts.timeout);
+      if (args[0] === "agent-contract-hook") contractReady.resolve();
+      if (args[0] === "inbox") inboxReady.resolve();
+      return result;
+    },
   };
   const native = async () => {
     const source=readFileSync(path.join(cwd,".pi/extensions/kata.js"), "utf8");
@@ -65,6 +66,7 @@ async function host(options: any = {}) {
   await piKata(api);
   if (options.nativeOrder === "plugin-first") await native();
   return { ctx, sid, tool, entries, calls, notices, widgets, messages, handlers, commands, models, thinking,
+    contextReady: Promise.all([contractReady.promise, inboxReady.promise]),
     event: async (name: string, data: any = {}) => { let result; for (const callback of handlers.get(name) || []) { const next=await callback(data,ctx); if(next!==undefined) result=next; } return result; },
     call: (params: any) => tool.execute("fixture", params, undefined, undefined, ctx),
     command: (args: string) => commands.get("todo").handler(args, ctx),
@@ -132,6 +134,8 @@ test("pi plans close from real Kata evidence with a typed pi parent exactly once
 test("pi uses structured prompt sections, preserves other extensions, and caches fallback context", async () => {
   process.env.KATA_INBOX_USER = "pi-builder";
   const app = await host(); await app.event("session_start", { reason: "startup" }); const ref = await app.init();
+  await app.event("before_agent_start", { systemPromptOptions: { sections: {} } });
+  await app.contextReady;
   const prompt = { systemPrompt: "immutable host prompt", systemPromptOptions: { sections: { authored: "keep me" } } };
   Object.defineProperty(prompt, "systemPrompt", { value: prompt.systemPrompt, writable: false });
   expect(await app.event("before_agent_start", prompt)).toBeUndefined();

@@ -330,17 +330,17 @@ test("session shutdown respects a teammate handoff", async () => {
   } finally { delete process.env.KATA_REF; }
 });
 for (const op of ["start", "block", "unblock"]) {
-test(`${op} preserves a changed decision before the guarded helper reread`, async () => {
+test(`${op} preserves a changed decision before the conditional attention write`, async () => {
   const parent = await issue();
   const status = op === "unblock" ? "blocked" : "pending";
   const ref = await issue(["todo.phase=Tasks", `todo.status=${status}`], parent);
   await claim(ref);
-  let reads = 0, raced = false;
+  let raced = false;
   const app = host(parent, async args => {
-    if (args[0] === "show" && args[1] === ref && ++reads === 2) {
+    if (!raced && args[0] === "meta" && args[2] === ref) {
       raced = true;
       await set(ref, "work.attention", "stuck");
-      await set(ref, "work.attention_msg", "new task blocker before helper reread");
+      await set(ref, "work.attention_msg", "new task blocker before conditional write");
     }
   });
   await app.begin();
@@ -348,7 +348,7 @@ test(`${op} preserves a changed decision before the guarded helper reread`, asyn
   expect(raced).toBe(true);
   const final = await show(ref);
   expect(final.metadata["work.attention"]).toBe("stuck");
-  expect(final.metadata["work.attention_msg"]).toBe("new task blocker before helper reread");
+  expect(final.metadata["work.attention_msg"]).toBe("new task blocker before conditional write");
   expect(final.metadata["todo.status"]).toBe(status);
 });
 }

@@ -1,10 +1,9 @@
 import { afterAll, beforeAll, beforeEach, expect, test } from "bun:test";
-import { execFile } from "node:child_process";
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import path from "node:path";
-import { promisify } from "node:util";
 import { createKataCore } from "../core/kata-core";
 import { assertIsolated } from "./isolation";
+import { isolatedKata } from "./kata-fixture";
 assertIsolated();
 const binary = process.env.KATA_TEST_EXECUTABLE!;
 const root = mkdtempSync(path.join(process.env.KATA_TEST_ROOT!, "reliability-"));
@@ -12,12 +11,7 @@ const cwd = path.join(root, "workspace"), outside = path.join(root, "outside"), 
 mkdirSync(cwd); mkdirSync(outside); mkdirSync(localProject);
 const env = { ...process.env, KATA_HOME: path.join(root, "home"), KATA_AUTHOR: "actor-a" };
 for (const key of ["KATA_REF", "KATA_TEAMMATE", "KATA_INBOX_USER"]) delete env[key];
-const exec = promisify(execFile);
-async function run(args: string[], dir = cwd) {
-  assertIsolated(env);
-  try { const out = await exec(binary, args, { cwd: dir, env, timeout: 60000 }); return { ...out, code: 0, killed: false }; }
-  catch (e: any) { return { stdout: e.stdout || "", stderr: e.stderr || e.message, code: e.code || 1, killed: !!e.killed }; }
-}
+const run = isolatedKata(binary, env, cwd, 60000);
 async function kata(args: string[]) { const r = await run(args); if (r.code) throw new Error(r.stderr); return JSON.parse(r.stdout || "null"); }
 const show = async (ref: string) => (await kata(["show", ref, "--json"])).issue;
 let seq = 0;
@@ -161,12 +155,29 @@ test("a deferred removal is invalidated when init keeps the task", async () => {
   expect((await show(p)).status).toBe("open");
 });
 
-for (const action of ["append", "rm"]) test(`${action} leaves a foreign closed task unchanged`, async () => {
+for (const op of ["init", "append"]) test(`kept ${op} preserves a promised completion through restored retry`, async () => {
+  let throttle = true;
+  const a = app({ before: (args: string[]) => args[0] === "close" && args.includes("--done") && throttle
+    ? { code: 1, stdout: "", stderr: "sibling close throttle" } : undefined });
+  await init(a); const ref = a.core.plan.tasks[0].ref;
+  expect((await a.call({ ...done, task: "First" })).isError).toBeUndefined();
+  expect((await a.call({ op, items: op === "init" ? ["First", "Second"] : ["First"] })).isError).toBeUndefined();
+  const saved = a.entries.filter(e => e.customType === "io.kata.omp.state").at(-1).data;
+  for (const [, pending] of saved.retries) pending.at = 0;
+  throttle = false;
+  const resumed = app({ entries: a.entries, sid: a.ctx.sessionManager.getSessionId() });
+  await resumed.call({ op: "view" });
+  const state = await show(ref);
+  expect(state.status).toBe("closed");
+  expect(state.closed_reason).toBe("done");
+});
+
+test("rm leaves a foreign closed task unchanged", async () => {
   const a = app(); await init(a); const ref = a.core.plan.tasks[1].ref;
   await kata(["claim", ref, "--as", "actor-b", "--force", "--json"]);
   await kata(["close", ref, "--done", "--message", message, "--test", "foreign proof", "--json"]);
   const before = await show(ref);
-  expect((await a.call({ op: action, task: "Second", items: ["Second"] })).isError).toBe(true);
+  expect((await a.call({ op: "rm", task: "Second" })).isError).toBe(true);
   expect(await show(ref)).toEqual(before);
 });
 test("starting foreign work does not demote the current task", async () => {
@@ -218,11 +229,7 @@ test("authenticated daemon actor can create and complete a plan despite local ac
   writeFileSync(tokenFile, "isolated-bootstrap-only", { mode: 0o600 });
   writeFileSync(path.join(authHome, "config.toml"), `[auth]\ntoken_file = ${JSON.stringify(bootstrapFile)}\nrequire_token_identity = true\n`);
   const authEnv = { ...env, KATA_HOME: authHome, KATA_AUTH_TOKEN_FILE: tokenFile };
-  async function authRun(args: string[]) {
-    assertIsolated(authEnv);
-    try { const out = await exec(binary, args, { cwd: authCwd, env: authEnv, timeout: 15000 }); return { ...out, code: 0 }; }
-    catch (e: any) { return { stdout: e.stdout || "", stderr: e.stderr || e.message, code: e.code || 1 }; }
-  }
+  const authRun = isolatedKata(binary, authEnv, authCwd, 15000);
   try {
     const issued = await authRun(["tokens", "create", "--actor", "token-actor", "--json"]); if (issued.code) throw new Error(issued.stderr);
     const token = JSON.parse(issued.stdout).plaintext; expect(typeof token).toBe("string");
@@ -307,4 +314,177 @@ for (const op of ["done", "drop", "rm"]) test(`${op} preserves another delegate'
   const before = await show(ref);
   expect((await a.call({ ...done, op, task: "First" })).isError).toBe(true);
   expect(await show(ref)).toEqual(before);
+});
+
+test("throttled First completion survives starting Second and retry drain", async () => {
+  let throttle = true;
+  const a = app({ before: (args: string[]) => args[0] === "close" && throttle ? { code: 1, stdout: "", stderr: "sibling close throttle" } : undefined });
+  await init(a);
+  const first = a.core.plan.tasks[0].ref;
+  const completion = await a.call({ ...done, task: "First" });
+  expect(completion.isError).toBeUndefined();
+  expect(completion.content[0].text).toContain("retry after 60 seconds");
+  const pendingBeforeStart = a.entries.filter(e => e.customType === "io.kata.omp.state").at(-1).data.retries.length;
+  expect(pendingBeforeStart).toBe(1);
+  const started = await a.call({ op: "start", task: "Second" });
+  expect(started.isError).toBeUndefined();
+  const saved = a.entries.filter(e => e.customType === "io.kata.omp.state").at(-1).data;
+  for (const [, pending] of saved.retries) pending.at = 0;
+  throttle = false;
+  const b = app({ entries: a.entries, sid: a.ctx.sessionManager.getSessionId() });
+  await b.call({ op: "view" });
+  const actual = await show(first);
+  expect(actual.status).toBe("closed");
+  expect(actual.metadata["todo.status"]).toBe("completed");
+  expect((await show(a.core.plan.tasks[1].ref)).metadata["todo.status"]).toBe("in_progress");
+});
+
+for (const invalid of ["missing proof", "short message"]) test(`rejected done with ${invalid} preserves its promised close`, async () => {
+  let throttle = true;
+  const a = app({ before: (args: string[]) => args[0] === "close" && throttle
+    ? { code: 1, stdout: "", stderr: "sibling close throttle" } : undefined });
+  await init(a); const ref = a.core.plan.tasks[0].ref;
+  const promised = await a.call({ ...done, task: "First" });
+  expect(promised.isError).toBeUndefined();
+  expect(promised.content[0].text).toContain("retry after 60 seconds");
+  const refused = await a.call({ ...done, task: "First", ...(invalid === "missing proof" ? { evidence: [] } : { message: "short" }) });
+  expect(refused.isError).toBe(true);
+  const saved = a.entries.filter(e => e.customType === "io.kata.omp.state").at(-1).data;
+  for (const [, pending] of saved.retries) pending.at = 0;
+  throttle = false;
+  const resumed = app({ entries: a.entries, sid: a.ctx.sessionManager.getSessionId() });
+  await resumed.call({ op: "view" });
+  const actual = await show(ref);
+  expect(actual.status).toBe("closed");
+  expect(actual.metadata["todo.status"]).toBe("completed");
+});
+
+test("invalid typed proof preserves an unowned task", async () => {
+  const a = app(); await init(a); const ref = a.core.plan.tasks[1].ref, before = await show(ref);
+  expect(before.owner).toBeFalsy();
+  expect((await a.call({ ...done, task: "Second", evidence: ["bogus"] })).isError).toBe(true);
+  expect(await show(ref)).toEqual(before);
+});
+test("an unclaimed pending task can retire, re-add and complete without being claimed", async () => {
+  const a = app(); await init(a); const ref = a.core.plan.tasks[1].ref;
+  expect((await show(ref)).owner).toBeFalsy();
+  expect((await a.call({ op: "drop", task: "Second", message: "This planned task is no longer needed." })).isError).toBeUndefined();
+  expect((await show(ref)).owner).toBeFalsy();
+  expect((await a.call({ op: "rm", task: "Second" })).isError).toBeUndefined();
+  expect((await a.call({ op: "append", items: ["Second"] })).isError).toBeUndefined();
+  expect(a.core.plan.tasks.find(t => t.content === "Second")?.ref).toBe(ref);
+  expect((await show(ref)).status).toBe("open");
+  expect((await show(ref)).owner).toBeFalsy();
+  expect((await a.call({ ...done, task: "Second" })).isError).toBeUndefined();
+  const final = await show(ref);
+  expect(final.status).toBe("closed");
+  expect(final.owner).toBeFalsy();
+  expect(final.metadata["todo.status"]).toBe("completed");
+});
+test("matching qualified init resolves a short explicit binding in its pinned workspace", async () => {
+  const origin = app(); const parent = await init(origin), short = parent.split("#")[1];
+  const bound = app({ ref: short }); await init(bound);
+  bound.ctx.cwd = outside;
+  const result = await bound.call({ op: "init", ref: parent, items: ["First", "Second"] });
+  expect(result.isError, result.content[0].text).toBeUndefined();
+  expect(result.details.kata.parent).toBe(parent);
+});
+for (const outcome of ["interrupted", "unrelated", "reassigned"]) test(`deferred removal handles an ${outcome} close without hiding newer work`, async () => {
+  let throttle = true;
+  const a = app({ before: (args: string[]) => args[0] === "close" && throttle
+    ? { code: 1, stdout: "", stderr: "sibling close throttle" } : undefined });
+  await init(a); const ref = a.core.plan.tasks[0].ref;
+  expect((await a.call({ op: "rm", task: "First" })).isError).toBeUndefined();
+  const saved = a.entries.filter(e => e.customType === "io.kata.omp.state").at(-1).data;
+  expect(saved.retries).toHaveLength(1);
+  for (const [, pending] of saved.retries) pending.at = 0;
+  throttle = false;
+  let interrupted = false, newer: any;
+  if (outcome === "unrelated") {
+    await kata(["close", ref, "--wontfix", "--message", "Another instruction retired this task independently after reviewing the outstanding work.", "--json"]);
+    newer = await show(ref);
+  }
+  const b = app({ entries: a.entries, sid: a.ctx.sessionManager.getSessionId(), before: async (args: string[]) => {
+    if (args[0] === "close" && args[1] === ref && outcome !== "unrelated" && !interrupted) {
+      const result = await run(args); expect(result.code).toBe(0); interrupted = true;
+      if (outcome === "reassigned") {
+        await kata(["meta", "set", ref, "teammate", "new-worker", "--json"]);
+        newer = await show(ref);
+      }
+      return { code: 1, stdout: "", stderr: "response interrupted after accepted close" };
+    }
+  } });
+  await b.call({ op: "view" });
+  expect(interrupted).toBe(outcome !== "unrelated");
+  await b.core.drainRetries();
+  const final = await show(ref);
+  expect(final.status).toBe("closed");
+  expect(final.metadata["todo.removed"]).not.toBe(true);
+  if (outcome === "interrupted") {
+    expect((await b.call({ op: "rm", task: "First" })).isError).toBeUndefined();
+    expect((await show(ref)).metadata["todo.removed"]).toBe(true);
+  } else expect(final).toEqual(newer);
+  await b.call({ op: "view" });
+  expect(b.core.plan.tasks.some(t => t.ref === ref)).toBe(outcome !== "interrupted");
+});
+
+test("rejected append preserves a completed automatic parent and its foreign child", async () => {
+  const a = app(); const parent = await init(a, ["Foreign closed"]), ref = a.core.plan.tasks[0].ref;
+  await kata(["claim", ref, "--as", "actor-b", "--force", "--json"]);
+  await kata(["close", ref, "--done", "--message", message, "--test", "foreign accepted proof", "--json"]);
+  await a.call({ op: "view" });
+  const before = await show(parent), childBefore = await show(ref);
+  expect(before.status).toBe("closed");
+  expect((await a.call({ op: "append", items: ["Foreign closed"] })).isError).toBe(true);
+  expect(await show(parent)).toEqual(before);
+  expect(await show(ref)).toEqual(childBefore);
+});
+test("qualified lowercase UID selects the same task as its short reference", async () => {
+  const a = app(); await init(a); const ref = a.core.plan.tasks[0].ref, issue = await show(ref);
+  const result = await a.call({ ...done, task: `reliability-test#${issue.uid.toLowerCase()}` });
+  expect(result.isError, result.content[0].text).toBeUndefined();
+  expect((await show(ref)).status).toBe("closed");
+});
+for (const [kind, proof] of [["missing", undefined], ["empty", []], ["empty paths", [{ type: "reviewed-paths", paths: [] }]]]) {
+  test(`valid sibling proof cannot hide ${kind} child evidence`, async () => {
+    let corruptUID = "";
+    const a = app({ before: async (args: string[]) => {
+      if (args[0] !== "events") return;
+      const out = await run(args), data = JSON.parse(out.stdout);
+      if (data.events?.[0]?.issue_uid === corruptUID) data.events[0].payload.evidence = proof;
+      return { ...out, stdout: JSON.stringify(data) };
+    } });
+    const parent = await init(a); corruptUID = (await show(a.core.plan.tasks[0].ref)).uid;
+    expect((await a.call({ ...done, task: "First" })).isError).toBeUndefined();
+    expect((await a.call({ ...done, task: "Second" })).isError).toBeUndefined();
+    const final = await kata(["show", parent, "--json"]);
+    expect(final.children.every((child: any) => child.status === "closed")).toBe(true);
+    expect(final.issue.status).toBe("open");
+    expect(final.labels.some((label: any) => label.label === "needs-review")).toBe(true);
+  });
+}
+test("refused replacement leaves every previous task unchanged", async () => {
+  const a = app(); await init(a); const first = a.core.plan.tasks[0].ref, second = a.core.plan.tasks[1].ref;
+  await kata(["claim", second, "--as", "actor-b", "--force", "--json"]);
+  const before = await show(first), foreign = await show(second);
+  expect((await a.call({ op: "init", items: ["Replacement"] })).isError).toBe(true);
+  expect(await show(first)).toEqual(before);
+  expect(await show(second)).toEqual(foreign);
+});
+test("refused replacement retains a previously promised completion", async () => {
+  let throttle = true;
+  const a = app({ before: (args: string[]) => args[0] === "close" && args.includes("--done") && throttle
+    ? { code: 1, stdout: "", stderr: "sibling close throttle" } : undefined });
+  await init(a); const first = a.core.plan.tasks[0].ref, second = a.core.plan.tasks[1].ref;
+  expect((await a.call({ ...done, task: "First" })).isError).toBeUndefined();
+  await kata(["claim", second, "--as", "actor-b", "--force", "--json"]);
+  const foreign = await show(second);
+  expect((await a.call({ op: "init", items: ["First"] })).isError).toBe(true);
+  const saved = a.entries.filter(e => e.customType === "io.kata.omp.state").at(-1).data;
+  for (const [, pending] of saved.retries) pending.at = 0;
+  throttle = false;
+  const resumed = app({ entries: a.entries, sid: a.ctx.sessionManager.getSessionId() });
+  await resumed.call({ op: "view" });
+  expect((await show(first)).status).toBe("closed");
+  expect(await show(second)).toEqual(foreign);
 });

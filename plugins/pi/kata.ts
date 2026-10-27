@@ -1,6 +1,6 @@
 import path from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { createKataCore, DESCRIPTION, kataCommands, matchDelegation, quote, render, teammateFor, delegateCommand, delegateContext, type Binding, type Task } from "./kata-core";
+import { createdParentRef, createKataCore, DESCRIPTION, kataCommands, matchDelegation, quote, render, teammateFor, delegateCommand, delegateContext, type Binding, type Task } from "./kata-core";
 
 // Match the native adapter's capability/scope selection, including a project
 // root boundary. Recheck at prompt time: either factory can load first.
@@ -109,9 +109,7 @@ export default async function piKata(pi: ExtensionAPI) {
 					"--teammate", inherited.teammate,
 					"--meta", `pi.session_id=${inherited.sessionId}`, "--meta", `pi.workspace=${inherited.workspace}`, "--label", "pi-session",
 					"--idempotency-key", `pi-session:${inherited.sessionId}`, "--force-new", "--json"], inherited.workspace));
-				const event = out.event ?? out.original_event;
-				if (!out.issue?.short_id || !event?.project_name) throw new Error("kata create returned no parent identity");
-				inherited.ref = `${event.project_name}#${out.issue.short_id}`;
+				inherited.ref = createdParentRef(out);
 				if (!out.issue.owner) await core.kata(["claim", inherited.ref!, "--if-unowned", "--teammate", inherited.teammate], inherited.workspace);
 				await core.kata(["meta", "set", inherited.ref!, "pi.auto_parent", "true", "--json-value"], inherited.workspace);
 			}
