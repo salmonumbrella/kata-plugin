@@ -1,6 +1,6 @@
 import path from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { createKataCore, DESCRIPTION, kataCommands, matchDelegation, quote, render, teammateFor, delegateCommand, delegateContext, type Binding, type Task } from "./kata-core";
+import { createdParentRef, createKataCore, DESCRIPTION, kataCommands, matchDelegation, quote, render, teammateFor, delegateCommand, delegateContext, type Binding, type Task } from "./kata-core";
 
 // Match the native adapter's capability/scope selection, including a project
 // root boundary. Recheck at prompt time: either factory can load first.
@@ -92,7 +92,7 @@ export default async function piKata(pi: ExtensionAPI) {
 		if (!inherited) return;
 		if (delegate) {
 			process.env.KATA_TEAMMATE = delegate.teammate;
-			process.env.KATA_INBOX_USER = `${await core.actor(delegate.binding.workspace)}/${delegate.teammate}`;
+			process.env.KATA_INBOX_USER = `${await core.actor(delegate.binding.workspace, delegate.ref)}/${delegate.teammate}`;
 			exportParent(ctx);
 			return;
 		}
@@ -106,11 +106,11 @@ export default async function piKata(pi: ExtensionAPI) {
 				// A session-start extension can spawn before the lead uses todo.
 				// Establish only parent identity; the child never writes lead work.*.
 				const out = JSON.parse(await core.kata(["create", "Todo plan: tasks", "--body", `Todo plan from pi session ${inherited.sessionId}.`,
-					"--owner", await core.actor(inherited.workspace), "--teammate", inherited.teammate,
+					"--teammate", inherited.teammate,
 					"--meta", `pi.session_id=${inherited.sessionId}`, "--meta", `pi.workspace=${inherited.workspace}`, "--label", "pi-session",
 					"--idempotency-key", `pi-session:${inherited.sessionId}`, "--force-new", "--json"], inherited.workspace));
-				if (!out.issue?.short_id || !out.event?.project_name) throw new Error("kata create returned no parent identity");
-				inherited.ref = `${out.event.project_name}#${out.issue.short_id}`;
+				inherited.ref = createdParentRef(out);
+				if (!out.issue.owner) await core.kata(["claim", inherited.ref!, "--if-unowned", "--teammate", inherited.teammate], inherited.workspace);
 				await core.kata(["meta", "set", inherited.ref!, "pi.auto_parent", "true", "--json-value"], inherited.workspace);
 			}
 		}
@@ -120,12 +120,12 @@ export default async function piKata(pi: ExtensionAPI) {
 		const chosen = process.env.KATA_TEAMMATE || "";
 		const teammate = chosen && chosen !== inherited.teammate && TEAMMATE.test(chosen) ? chosen : teammateFor(`${inherited.teammate || "pi"}:${inherited.sessionId}:${id}`);
 		process.env.KATA_TEAMMATE = teammate;
-		process.env.KATA_INBOX_USER = `${await core.actor(binding.workspace)}/${teammate}`;
+		process.env.KATA_INBOX_USER = `${await core.actor(binding.workspace, binding.parent)}/${teammate}`;
 		const shown = JSON.parse(await core.kata(["show", binding.parent, "--json"], binding.workspace));
 		// Any open child may be named; plan tasks and other children also match by content.
 		const children = (shown.children ?? []).filter((c: any) => c.status === "open");
 		const refOf = (c: any) => c.qualified_id || `${binding.parent.split("#")[0]}#${c.short_id}`;
-		const actor = await core.actor(binding.workspace), lead = inherited.teammate;
+		const actor = await core.actor(binding.workspace, binding.parent), lead = inherited.teammate;
 		// Another delegate's issue, or one another writer owns, is never a candidate.
 		const foreign = (c: any) => !!(c.metadata?.["pi.subagent_id"] || c.metadata?.["omp.subagent_id"]) ||
 			(!!c.owner && (c.owner !== actor || ![lead, teammate].includes(c.metadata?.teammate || "")));
