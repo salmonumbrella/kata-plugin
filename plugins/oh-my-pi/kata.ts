@@ -1,15 +1,20 @@
 // Generated from root kata.ts by bun run build:plugins.
 // omp-kata: Kata replaces oh-my-pi's todo tracker.
 //
-// Run with `todo.enabled: false` in omp's config. This extension then owns:
+// Installing the plugin is the whole setup: omp lets an extension re-register a
+// built-in tool by name, so this `todo` replaces the native one. Results keep the
+// plan under details.kata (not details.phases), so omp's native todo tracker has
+// nothing to remind or render. `todo.enabled: false` still works. This extension owns:
 //   - the `todo` tool (same ops as omp's: init, start, done, drop, rm, block,
 //     unblock, append, view), with every task stored as a Kata child issue;
 //   - `/todo`, intercepted on input before omp's built-in command;
 //   - a progress widget and a stop reminder while tasks remain open;
 //   - cached Kata contracts, guarded main-session attention, and delegate identity.
 //
-// In Kata projects, plan items are children carrying `todo.phase`; other children
-// participate in parent closure. Unbound folders use a session-local plan.
+// Plan items are children carrying `todo.phase`; other children participate in
+// parent closure. A folder with no Kata project plans in KATA_DEFAULT_PROJECT
+// (labeled with the repo) or in its inferred project, registered on first use.
+// The plan is session-local only while Kata is unreachable, then it replays.
 
 import path from "node:path";
 import { createKataCore, DESCRIPTION, sessionKey, render, matchDelegation, namedTask,
@@ -112,7 +117,7 @@ export default function ompKata(pi: any) {
 			prepare: record => serial(async () => {
 				await ensureParent({}, ctx);
 				if (!core.plan.parent || core.plan.local) return;
-				const binding: Binding = { parent: core.plan.parent, workspace: core.plan.workspace!, sessionId: id, auto: core.plan.auto };
+				const binding: Binding = { parent: core.plan.parent, workspace: core.plan.workspace!, sessionId: id, auto: core.plan.auto, label: core.plan.label };
 				record.binding = binding;
 				// todo init and task often share one batch, so the plan may not have
 				// existed when the task call was seen. Match against it now.
@@ -136,7 +141,7 @@ export default function ompKata(pi: any) {
 				} else {
 					const out = JSON.parse(await kata(["create", `Subagent ${record.id}`, "--parent", binding.parent, "--project", binding.parent.split("#")[0],
 						"--body", `Delegated OMP work for agent ${record.id}, session ${id}. The subagent must close this issue itself with its verification evidence.`,
-						"--owner", await actor(binding.workspace), "--teammate", record.teammate,
+						"--owner", await actor(binding.workspace), "--teammate", record.teammate, ...(binding.label ? ["--label", binding.label] : []),
 						"--meta", `omp.subagent_id=${record.id}`, "--meta", `omp.session_id=${id}`, "--meta", `omp.parent_agent_id=${record.parentAgentId || "main"}`,
 						"--meta", "omp.status=running", "--idempotency-key", `omp-agent:${id}:${record.id}`, "--force-new", "--json"], binding.workspace));
 					record.ref = `${binding.parent.split("#")[0]}#${out.issue.short_id}`;
@@ -280,8 +285,11 @@ export default function ompKata(pi: any) {
 			main(ctx) && core.currentId !== ctx.sessionManager?.getSessionId?.() ? serial(() => bind(ctx)) : undefined,
 			(async () => { if (!main(ctx)) await prepareIfTracked(ctx); await warm(ctx); })(),
 		]));
+		const base = (Array.isArray(event.systemPrompt) ? event.systemPrompt : [event.systemPrompt || ""]).filter((s: string) => !/^<kata_(contract|todo|inbox|binding)>/.test(s));
 		const sections: string[] = [];
-		if (core.cache.contract) sections.push(`<kata_contract>\n${core.cache.contract}\n</kata_contract>`);
+		// Something else (an earlier injection, another installer) may already carry the contract.
+		const contract = core.cache.contract;
+		if (contract && !base.some((s: string) => s.includes(contract.slice(0, 80)))) sections.push(`<kata_contract>\n${contract}\n</kata_contract>`);
 		const delegate = !main(ctx) ? self(ctx) : undefined;
 		if (delegate?.ref && delegate.binding) {
 			sections.push(`<kata_binding>\n${delegateContext(EXECUTABLE, ctx.agent.id, delegate.ref, delegate.teammate, delegate.binding)}\n</kata_binding>`);
@@ -289,7 +297,6 @@ export default function ompKata(pi: any) {
 		if (core.cache.inbox) sections.push(`<kata_inbox>\n${core.cache.inbox}\n</kata_inbox>`);
 		if (main(ctx) && core.plan.parent) sections.push(`<kata_todo>\nThe todo tool is backed by Kata. Current plan:\n${render(core.plan)}\n</kata_todo>`);
 		if (!sections.length) return;
-		const base = (Array.isArray(event.systemPrompt) ? event.systemPrompt : [event.systemPrompt || ""]).filter((s: string) => !/^<kata_(contract|todo|inbox|binding)>/.test(s));
 		return { systemPrompt: [...base, sections.join("\n\n")] };
 	});
 

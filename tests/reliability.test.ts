@@ -24,6 +24,8 @@ function app(options: any = {}) {
   }, { namespace: "omp", executable: binary, explicitRef: () => options.ref });
   return { core, calls, entries, ctx, call: (p: any) => core.execute(p, ctx) };
 }
+// Kata unusable: the only case that selects a session-local plan.
+const down = () => ({ code: 1, stdout: "", stderr: "dial tcp: connection refused" });
 const message = "Verified the isolated reliability task with the behavioral regression suite.";
 const done = { op: "done", message, evidence: ["test:reliability fixture"] };
 async function init(a: ReturnType<typeof app>, items = ["First", "Second"]) {
@@ -114,7 +116,7 @@ for (const failure of ["marker", "claim"]) test(`automatic parent setup recovers
   const state = await show(p); expect(state.owner).toBe("actor-a"); expect(state.metadata["work.attention"]).toBe("ok");
 });
 for (const status of ["pending", "in_progress", "completed", "blocked"]) test(`local append reuses a ${status} task without losing state`, async () => {
-  const a = app({ cwd: outside }); await init(a, ["Anchor", "Repeated"]);
+  const a = app({ cwd: outside, before: down }); await init(a, ["Anchor", "Repeated"]);
   if (status === "in_progress") await a.call({ op: "start", task: "Repeated" });
   if (status === "completed") await a.call({ op: "done", task: "Repeated" });
   if (status === "blocked") await a.call({ op: "block", task: "Repeated", reason: "Retained blocker" });
@@ -125,11 +127,11 @@ for (const status of ["pending", "in_progress", "completed", "blocked"]) test(`l
   expect(task.blocker).toBe(status === "blocked" ? "Retained blocker" : undefined);
 });
 test("local view clears a recovered error and preserves snapshot tasks", async () => {
-  const a = app({ cwd: outside }); await init(a);
+  const a = app({ cwd: outside, before: down }); await init(a);
   await a.call({ op: "block", task: "Second", reason: "Retained wait" });
   const saved = a.entries.filter(e => e.customType === "io.kata.omp.state").at(-1).data;
   saved.plan.error = "Transient bind failure";
-  const b = app({ cwd: outside, entries: a.entries, sid: a.ctx.sessionManager.getSessionId() });
+  const b = app({ cwd: outside, before: down, entries: a.entries, sid: a.ctx.sessionManager.getSessionId() });
   expect((await b.call({ op: "view" })).content[0].text).toContain("Session-local");
   expect(b.core.plan.tasks).toHaveLength(2);
   expect(b.core.plan.tasks.find(t => t.content === "Second")?.blocker).toBe("Retained wait");
@@ -299,10 +301,10 @@ for (const corrupt of ["reset", "uid", "time", "evidence"]) test(`parent remains
 });
 
 test("ambiguous recovered local identities are rejected without replacing tasks", async () => {
-  const a = app({ cwd: outside }); await init(a, ["Repeated"]);
+  const a = app({ cwd: outside, before: down }); await init(a, ["Repeated"]);
   const saved = a.entries.filter(e => e.customType === "io.kata.omp.state").at(-1).data;
   saved.plan.tasks.push({ ...saved.plan.tasks[0] });
-  const b = app({ cwd: outside, entries: a.entries, sid: a.ctx.sessionManager.getSessionId() });
+  const b = app({ cwd: outside, before: down, entries: a.entries, sid: a.ctx.sessionManager.getSessionId() });
   const result = await b.call({ op: "append", items: ["Repeated"] });
   expect(result.isError).toBe(true);
   expect(b.core.plan.tasks).toHaveLength(2);

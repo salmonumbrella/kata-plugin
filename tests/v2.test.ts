@@ -25,6 +25,7 @@ async function kata(args: string[], workspace = cwd): Promise<any> {
 const show = async (ref: string) => kata(["show", ref, "--json"]);
 let sequence = 0;
 async function issue(title = "Explicit parent") { return (await kata(["create", `${title} ${++sequence}`, "--force-new", "--json"])).issue.short_id; }
+const down = () => ({ code: 1, stdout: "", stderr: "dial tcp: connection refused" });
 const evidence = ["test:bun test fixture"];
 const message = "Implemented this isolated fixture and verified its behavior with the regression suite.";
 function host(options: any = {}) {
@@ -71,13 +72,13 @@ test("subagent start and shutdown never touch main attention or widget", async (
   expect(app.widgets).toEqual([]);
 });
 
-test("nonproject folders get a local plan without Kata mutations or prompt noise", async () => {
-  const app = host({ cwd: outside }); await app.event("session_start");
+test("an unreachable Kata gets a local plan without Kata mutations and one warning", async () => {
+  const app = host({ cwd: outside, before: down }); await app.event("session_start");
   await app.init();
   expect((await app.call({ op: "done", task: "Implement fixture" })).isError).toBeUndefined();
   expect((await app.call({ op: "view" })).content[0].text).toContain("Session-local");
   expect(app.calls.some(a => ["create", "claim", "meta", "close"].includes(a[0]))).toBe(false);
-  expect(app.notices).toEqual([]);
+  expect(app.notices.map(n => n[1])).toEqual(["warning"]);
 });
 
 test("KATA_REF beats stored session binding and is qualified", async () => {
@@ -450,15 +451,15 @@ test("a delegated plan task cannot be assigned to a second subagent", async () =
 });
 
 test("local plan and blockers survive extension recreation through session entries", async () => {
-  const app = host({ cwd: outside }); await app.event("session_start");
+  const app = host({ cwd: outside, before: down }); await app.event("session_start");
   await app.init(["Durable local first", "Durable local second"]);
   await app.call({ op: "block", reason: "Waiting on a durable dependency" });
   const entries = JSON.parse(JSON.stringify(app.entries));
-  const resumed = host({ cwd: outside, sid: app.sid, entries }); await resumed.event("session_start");
+  const resumed = host({ cwd: outside, before: down, sid: app.sid, entries }); await resumed.event("session_start");
   const view = await resumed.call({ op: "view" });
   expect(view.content[0].text).toContain("Waiting on a durable dependency");
-  expect(view.details.phases[0].tasks.map((t: any) => t.status)).toEqual(["blocked", "in_progress"]);
-  const other = host({ cwd: outside, entries }); await other.event("session_start");
+  expect(view.details.kata.phases[0].tasks.map((t: any) => t.status)).toEqual(["blocked", "in_progress"]);
+  const other = host({ cwd: outside, before: down, entries }); await other.event("session_start");
   expect((await other.call({ op: "view" })).content[0].text).toContain("No todo plan");
 });
 
@@ -636,12 +637,12 @@ test("failed refresh never presents cached tasks as current and recovers on view
   expect(failed.isError).toBe(true);
   expect(failed.content[0].text).toContain("hosted service unavailable");
   expect(failed.content[0].text).not.toContain("0/1 done");
-  expect(failed.details.phases).toEqual([]);
+  expect(failed.details.kata.phases).toEqual([]);
   expect(app.widgets.at(-1)[1]?.join(" ")).not.toContain("0/1 done");
   unavailable = false;
   const recovered = await app.call({ op: "view" });
   expect(recovered.isError).toBeUndefined();
-  expect(recovered.details.phases[0].tasks[0].status).toBe("completed");
+  expect(recovered.details.kata.phases[0].tasks[0].status).toBe("completed");
 });
 
 test("failed initial binding is retried by view without losing the hosted plan", async () => {
@@ -659,7 +660,7 @@ test("failed initial binding is retried by view without losing the hosted plan",
   unavailable = false;
   const recovered = await app.call({ op: "view" });
   expect(recovered.details.kata.parent).toBe(parent);
-  expect(recovered.details.phases[0].tasks[0].content).toBe("Recover bound plan");
+  expect(recovered.details.kata.phases[0].tasks[0].content).toBe("Recover bound plan");
 });
 
 for (const source of ["parameter", "environment", "stored"]) test(`qualified ${source} binding stays authoritative outside the project workspace`, async () => {
@@ -679,7 +680,7 @@ test("an unavailable explicit hosted binding errors instead of creating a local 
   const result = await app.call({ op: "init", ref: "v2test#zzzz", items: ["Never local"] });
   expect(result.isError).toBe(true);
   expect(result.content[0].text).not.toContain("Session-local");
-  expect(result.details.phases).toEqual([]);
+  expect(result.details.kata.phases).toEqual([]);
 });
 
 test("tracked worker todo uses its assigned issue and teammate from an unbound worktree", async () => {
@@ -712,7 +713,7 @@ for (const children of [0, {}, [null]]) test(`malformed hosted children ${JSON.s
   corrupt = true;
   const result = await app.call({ op: "view" });
   expect(result.isError).toBe(true);
-  expect(result.details.phases).toEqual([]);
+  expect(result.details.kata.phases).toEqual([]);
   expect(result.content[0].text).not.toContain("0/1 done");
 });
 
@@ -752,7 +753,7 @@ test("arbitrary non-array hosted children never expose cached state", async () =
     children = value;
     const result = await app.call({ op: "view" });
     expect(result.isError).toBe(true);
-    expect(result.details.phases).toEqual([]);
+    expect(result.details.kata.phases).toEqual([]);
     expect(result.content[0].text).not.toContain("0/1 done");
   }), { numRuns: 100, seed: 251025 });
 });

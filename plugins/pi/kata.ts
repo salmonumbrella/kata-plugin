@@ -17,7 +17,7 @@ export function nativeContractActive(cwd: string): boolean {
 	return false;
 }
 
-export type PiParent = { pid: number; sessionId: string; ref?: string; workspace: string; teammate: string; provider?: string; model?: string; thinking?: string };
+export type PiParent = { pid: number; sessionId: string; ref?: string; workspace: string; label?: string; teammate: string; provider?: string; model?: string; thinking?: string };
 
 // A child pi started without its own model flags runs on the parent's model,
 // not on the configured default (which may have no working login).
@@ -85,6 +85,7 @@ export default async function piKata(pi: ExtensionAPI) {
 		process.env.KATA_PI_PARENT = JSON.stringify({ pid: process.pid, sessionId: ctx.sessionManager.getSessionId(),
 			ref: inherited ? delegate?.ref : core.plan.parent || explicit,
 			workspace: inherited ? delegate?.binding.workspace || inherited.workspace : core.plan.workspace || path.resolve(ctx.cwd),
+			label: inherited ? delegate?.binding.label || inherited.label : core.plan.label,
 			teammate: process.env.KATA_TEAMMATE || "",
 			...(ctx.model ? { provider: ctx.model.provider, model: ctx.model.id, thinking: pi.getThinkingLevel?.() } : {}) } satisfies PiParent);
 	}
@@ -99,13 +100,20 @@ export default async function piKata(pi: ExtensionAPI) {
 		const id = ctx.sessionManager.getSessionId();
 		if (!id) throw new Error("Pi child needs a real session identity before tracking work.");
 		if (!inherited.ref) {
-			const candidates = JSON.parse(await core.kata(["list", "--status", "all", "--meta", `pi.session_id=${inherited.sessionId}`, "--label", "pi-session", "--limit", "2", "--json"], inherited.workspace)).issues ?? [];
-			const parent = candidates.find((issue: any) => issue.metadata?.["pi.auto_parent"] === true);
+			const workspace = inherited.workspace;
+			await core.serial(async () => { await core.probe(workspace); }); // after any bind in flight
+			const project = core.candidate(workspace).project;
+			let found: any[] = [];
+			try { found = JSON.parse(await core.kata(["list", "--status", "all", ...(project ? ["--project", project] : []), "--meta", `pi.session_id=${inherited.sessionId}`, "--label", "pi-session", "--limit", "2", "--json"], inherited.workspace)).issues ?? []; }
+			catch (error) { if (!project || !/project_not_initialized/.test(String(error))) throw error; } // the project is not registered yet: no earlier parent
+			const parent = found.find((issue: any) => issue.metadata?.["pi.auto_parent"] === true);
 			if (parent) inherited.ref = parent.qualified_id;
 			else {
 				// A session-start extension can spawn before the lead uses todo.
 				// Establish only parent identity; the child never writes lead work.*.
-				const out = JSON.parse(await core.kata(["create", "Todo plan: tasks", "--body", `Todo plan from pi session ${inherited.sessionId}.`,
+				const where = await core.destination(inherited.workspace);
+				inherited.label ??= where.label;
+				const out = JSON.parse(await core.kata(["create", "Todo plan: tasks", ...(where.project ? ["--project", where.project] : []), ...(where.label ? ["--label", where.label] : []), "--body", `Todo plan from pi session ${inherited.sessionId}.`,
 					"--teammate", inherited.teammate,
 					"--meta", `pi.session_id=${inherited.sessionId}`, "--meta", `pi.workspace=${inherited.workspace}`, "--label", "pi-session",
 					"--idempotency-key", `pi-session:${inherited.sessionId}`, "--force-new", "--json"], inherited.workspace));
@@ -115,7 +123,7 @@ export default async function piKata(pi: ExtensionAPI) {
 			}
 		}
 		if (!inherited.ref) throw new Error("Pi child parent identity is unavailable.");
-		const binding: Binding = { parent: inherited.ref, workspace: inherited.workspace, sessionId: inherited.sessionId, auto: false };
+		const binding: Binding = { parent: inherited.ref, workspace: inherited.workspace, sessionId: inherited.sessionId, auto: false, label: inherited.label };
 		// Keep a teammate the lead chose for this child; otherwise derive a distinct one.
 		const chosen = process.env.KATA_TEAMMATE || "";
 		const teammate = chosen && chosen !== inherited.teammate && TEAMMATE.test(chosen) ? chosen : teammateFor(`${inherited.teammate || "pi"}:${inherited.sessionId}:${id}`);
@@ -149,7 +157,7 @@ export default async function piKata(pi: ExtensionAPI) {
 			await core.kata(["meta", "set", ref, "todo.status", "in_progress"], binding.workspace);
 		} else {
 			const out = JSON.parse(await core.kata(["create", `Subagent ${id}`, "--parent", binding.parent, "--project", binding.parent.split("#")[0],
-				"--body", `Delegated Pi work. The child must close this issue with its verification evidence.`, "--owner", actor, "--teammate", teammate,
+				"--body", `Delegated Pi work. The child must close this issue with its verification evidence.`, "--owner", actor, "--teammate", teammate, ...(binding.label ? ["--label", binding.label] : []),
 				"--meta", `pi.subagent_id=${id}`, "--meta", `pi.session_id=${inherited.sessionId}`, "--idempotency-key", key, "--force-new", "--json"], binding.workspace));
 			if (!out.issue?.short_id) throw new Error("kata create returned no child identity");
 			ref = `${binding.parent.split("#")[0]}#${out.issue.short_id}`;
