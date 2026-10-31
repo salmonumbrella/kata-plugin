@@ -100,7 +100,9 @@ export default async function piKata(pi: ExtensionAPI) {
 		const id = ctx.sessionManager.getSessionId();
 		if (!id) throw new Error("Pi child needs a real session identity before tracking work.");
 		if (!inherited.ref) {
-			const project = core.candidate(inherited.workspace).project;
+			const workspace = inherited.workspace;
+			await core.serial(async () => { await core.probe(workspace); }); // after any bind in flight
+			const project = core.candidate(workspace).project;
 			let found: any[] = [];
 			try { found = JSON.parse(await core.kata(["list", "--status", "all", ...(project ? ["--project", project] : []), "--meta", `pi.session_id=${inherited.sessionId}`, "--label", "pi-session", "--limit", "2", "--json"], inherited.workspace)).issues ?? []; }
 			catch (error) { if (!project || !/project_not_initialized/.test(String(error))) throw error; } // the project is not registered yet: no earlier parent

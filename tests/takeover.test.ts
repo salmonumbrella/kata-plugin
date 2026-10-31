@@ -76,6 +76,11 @@ test("an unregistered git repo registers its inferred project and plans there wi
   expect((await kata(["show", parent, "--json"])).issue.status).toBe("closed");
 });
 
+test("the inferred project keeps the repo's case", async () => {
+  const result = await host({ cwd: repo("MixedCaseRepo") }).call({ op: "init", items: ["Case step"] });
+  expect(result.details.kata.parent).toMatch(/^MixedCaseRepo#/);
+});
+
 test("a folder without git uses its basename", async () => {
   const dir = path.join(scratch, "plainfolder"); mkdirSync(dir);
   const app = host({ cwd: dir });

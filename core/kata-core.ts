@@ -41,8 +41,8 @@ export function sessionKey(file: string, cwd: string): string {
 }
 
 // Valid for Kata labels and safe inside a project#id ref.
-export function slug(text: string | undefined): string | undefined {
-	const value = (text ?? "").toLowerCase().replace(/[^a-z0-9._-]+/g, "-").replace(/^[-._]+|[-._]+$/g, "").slice(0, 64).replace(/[-._]+$/, "");
+export function slug(text: string | undefined, keepCase = false): string | undefined {
+	const value = (keepCase ? text ?? "" : (text ?? "").toLowerCase()).replace(keepCase ? /[^A-Za-z0-9._-]+/g : /[^a-z0-9._-]+/g, "-").replace(/^[-._]+|[-._]+$/g, "").slice(0, 64).replace(/[-._]+$/, "");
 	return value || undefined;
 }
 // The name Kata would infer for an unregistered workspace, read from its own
@@ -50,7 +50,7 @@ export function slug(text: string | undefined): string | undefined {
 export function inferredName(refusal: string, cwd: string): string {
 	const named = /project (\S+) is not registered/.exec(refusal)?.[1];
 	const alias = /alias (\S+) is not registered/.exec(refusal)?.[1]?.replace(/^local:\/\//, "").replace(/\/+$/, "").split("/").pop();
-	return slug((named ?? alias ?? path.basename(path.resolve(cwd))).replace(/\.git$/, "")) ?? slug(path.basename(path.resolve(cwd))) ?? "workspace";
+	return slug((named ?? alias ?? path.basename(path.resolve(cwd))).replace(/\.git$/, ""), true) ?? slug(path.basename(path.resolve(cwd)), true) ?? "workspace";
 }
 
 export function quote(value: string): string { return `'${value.replace(/'/g, "'\\''")}'`; }
@@ -495,10 +495,13 @@ export function createKataCore(host: CoreHost, options: CoreOptions) {
 	async function replayLocal(ctx: any) {
 		if (!plan.local || !await probe(ctx.cwd)) return;
 		const local = plan.tasks;
+		// Nothing was planned offline (a delegation only needed a parent): create nothing.
+		if (!local.length) { delete plan.local; return; }
 		plan = { tasks: [] };
 		try {
 			const phases = [...new Set(local.map(t => t.phase))].map(phase => ({ phase }));
 			await ensureParent({ list: phases }, ctx);
+			if (plan.local) { plan = { tasks: local, local: true }; return; } // Kata went away again
 			const cwd = plan.workspace!;
 			for (const t of local) await create(t.phase, t.content, cwd);
 			await load(cwd);
