@@ -537,7 +537,7 @@ export function createKataCore(host: CoreHost, options: CoreOptions) {
 		const where = candidate(ctx.cwd);
 		let list: any[];
 		try { list = JSON.parse(await kata(["list", "--status", "all", ...(where.project ? ["--project", where.project] : []), "--meta", `${namespace}.session_id=${id}`, "--label", `${namespace}-session`, "--limit", "2", "--json"], ctx.cwd)).issues ?? []; }
-		catch (error) { if (where.project) { debug(error); return; } throw error; } // the project does not exist yet: no earlier parent
+		catch (error) { if (where.project && /project_not_initialized/.test(String(error))) return; throw error; } // the project is not registered yet: no earlier parent
 		// Creation records session identity before the guarded claim can finish.
 		const candidates = list.filter((issue: any) => (issue.metadata?.[`${namespace}.auto_parent`] === true || issue.metadata?.[`${namespace}.auto_parent`] === undefined) && issue.metadata?.[`${namespace}.session_id`] === id && sessionKey(issue.metadata?.[`${namespace}.workspace`] || ".", ctx.cwd) === sessionKey(ctx.cwd, ctx.cwd));
 		if (candidates.length === 1) return { parent: candidates[0].qualified_id, workspace: candidates[0].metadata[`${namespace}.workspace`], sessionId: id, auto: true, label: where.label };
@@ -574,9 +574,11 @@ export function createKataCore(host: CoreHost, options: CoreOptions) {
 		for (const entry of ctx.sessionManager?.getBranch?.() ?? []) {
 			if (entry?.type === "custom" && entry.customType === STATE_ENTRY && typeof entry.data?.parent === "string" && (!entry.data.sessionId || entry.data.sessionId === id)) stored = entry.data;
 		}
+		if (plan.local && !explicit) stored = undefined;
 		if (!explicit && !stored) {
 			if (!await probe(ctx.cwd)) { await drainRetries(); bound = true; refresh(ctx); return; }
-			if (id) stored = await sessionBinding(ctx);
+			// A restored offline plan replays into its parent itself; do not rebind over it.
+			if (id && !plan.local) stored = await sessionBinding(ctx);
 		}
 		const parent = explicit || stored?.parent;
 		if (parent) {
@@ -822,8 +824,16 @@ export function createKataCore(host: CoreHost, options: CoreOptions) {
 		if (typeof sessionId !== "string" || !sessionId.trim()) throw new Error("Kata needs a real session id before creating an automatic parent.");
 		const title = (params.message as string | undefined)?.trim() || host.getSessionName?.() || `Todo plan: ${(params.list ?? []).map((p: any) => p.phase).join(", ") || "tasks"}`.slice(0, 120);
 		const cwd = path.resolve(ctx.cwd);
-		const where = await destination(cwd);
-		const out = JSON.parse(await kata(["create", ...(where.project ? ["--project", where.project] : []), ...(where.label ? ["--label", where.label] : []), "--body", `Todo plan from ${namespace} session ${sessionId}.`, "--meta", `${namespace}.session_id=${sessionId}`, "--meta", `${namespace}.workspace=${cwd}`, "--label", `${namespace}-session`, "--idempotency-key", `${namespace}-session:${sessionId}`, "--force-new", "--json", "--", title], cwd));
+		let where: Awaited<ReturnType<typeof destination>>, out: any;
+		try {
+			where = await destination(cwd);
+			out = JSON.parse(await kata(["create", ...(where.project ? ["--project", where.project] : []), ...(where.label ? ["--label", where.label] : []), "--body", `Todo plan from ${namespace} session ${sessionId}.`, "--meta", `${namespace}.session_id=${sessionId}`, "--meta", `${namespace}.workspace=${cwd}`, "--label", `${namespace}-session`, "--idempotency-key", `${namespace}-session:${sessionId}`, "--force-new", "--json", "--", title], cwd));
+		} catch (error) {
+			// A folder with no git ancestor is refused client-side, so the probe never reached the daemon.
+			if (!UNUSABLE.test(String(error))) throw error;
+			scope = "down"; outage = (error as Error)?.message ?? String(error); debug(error);
+			goLocal(ctx); return;
+		}
 		const ref = createdParentRef(out);
 		let decision = await owned(ref, cwd, true, false, out.issue.revision);
 		decision = await work(ref, `${namespace}.auto_parent`, true, cwd, decision);

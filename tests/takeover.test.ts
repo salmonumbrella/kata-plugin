@@ -176,6 +176,34 @@ test("a replay that fails partway keeps the local plan and finishes on the next 
   expect((await app.call({ op: "view" })).content[0].text).not.toContain("Session-local");
 });
 
+test("a resumed session replays an offline plan even after a partly failed replay", async () => {
+  let down = true, flaky = false;
+  const dir = repo("resumereplay");
+  const before = (a: string[]) => down ? { code: 1, stdout: "", stderr: "connection refused" }
+    : flaky && a[0] === "create" && a.includes("--parent") ? { code: 1, stdout: "", stderr: "storage hiccup" } : undefined;
+  const first = host({ cwd: dir, before });
+  await first.call({ op: "init", items: ["Survives one", "Survives two"] });
+  down = false; flaky = true;
+  expect((await first.call({ op: "append", items: ["Survives three"] })).isError).toBe(true);
+  flaky = false;
+  const resumed = host({ cwd: dir, before });
+  resumed.entries.push(...JSON.parse(JSON.stringify(first.entries)));
+  Object.assign(resumed.ctx.sessionManager, { getSessionId: () => first.sid });
+  await resumed.event("session_start");
+  const view = await resumed.call({ op: "view" });
+  const shown = await kata(["show", view.details.kata.parent, "--json"]);
+  expect(shown.children.map((c: any) => c.title).sort()).toEqual(["Survives one", "Survives two"]);
+});
+
+test("a daemon that dies after a client-side refusal still yields a local plan", async () => {
+  const dir = path.join(scratch, "nogit-outage"); mkdirSync(dir);
+  const app = host({ cwd: dir, before: (a: string[]) => a[0] === "projects" || a[0] === "create" ? { code: 7, stdout: "", stderr: '{"error":{"code":"daemon_unavailable"}}' } : undefined });
+  const result = await app.call({ op: "init", items: ["Offline in a plain folder"] });
+  expect(result.isError).toBeUndefined();
+  expect(result.content[0].text).toContain("Session-local");
+  expect(app.notices.filter(n => n[1] === "warning")).toHaveLength(1);
+});
+
 test("a missing executable is an outage too", async () => {
   const app = host({ cwd: repo("noexec"), before: () => { throw new Error("Executable not found in $PATH: \"kata\""); } });
   const first = await app.call({ op: "init", items: ["No binary"] });

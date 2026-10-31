@@ -103,7 +103,7 @@ export default async function piKata(pi: ExtensionAPI) {
 			const project = core.candidate(inherited.workspace).project;
 			let found: any[] = [];
 			try { found = JSON.parse(await core.kata(["list", "--status", "all", ...(project ? ["--project", project] : []), "--meta", `pi.session_id=${inherited.sessionId}`, "--label", "pi-session", "--limit", "2", "--json"], inherited.workspace)).issues ?? []; }
-			catch (error) { if (!project) throw error; core.debug(error); } // the project does not exist yet: no earlier parent
+			catch (error) { if (!project || !/project_not_initialized/.test(String(error))) throw error; } // the project is not registered yet: no earlier parent
 			const parent = found.find((issue: any) => issue.metadata?.["pi.auto_parent"] === true);
 			if (parent) inherited.ref = parent.qualified_id;
 			else {
