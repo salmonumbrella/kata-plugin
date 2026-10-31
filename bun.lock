@@ -24,11 +24,11 @@
     },
     "plugins/oh-my-pi": {
       "name": "kata-omp",
-      "version": "2.1.1",
+      "version": "2.2.0",
     },
     "plugins/pi": {
       "name": "kata-pi",
-      "version": "1.1.1",
+      "version": "1.2.0",
       "peerDependencies": {
         "@earendil-works/pi-coding-agent": "*",
         "typebox": "*",

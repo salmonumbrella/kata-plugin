@@ -22,7 +22,7 @@ The first delegation creates an automatic session parent. The child receives its
 
 ## Oh-my-pi
 
-Start OMP with its native todo disabled. Ask: “Use todo to plan two tasks: implement a small function, then test it. Complete each task with a substantive message and passing test or commit evidence. Let the plugin close the automatic parent.”
+Start OMP; no configuration is needed. To see the default-project behavior, run it in a folder with no Kata project: the plan lands in the project registered for the folder, or in `KATA_DEFAULT_PROJECT` labeled with the folder name. Ask: “Use todo to plan two tasks: implement a small function, then test it. Complete each task with a substantive message and passing test or commit evidence. Let the plugin close the automatic parent.”
 
 Use `/todo` to see the plan. A task stays unfinished if Kata refuses its close. Once both children are closed, inspect `kata list --status all` and `kata show <parent-ref>`.
 

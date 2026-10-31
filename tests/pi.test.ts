@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, beforeEach, expect, test } from "bun:test";
+import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, realpathSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { Value } from "typebox/value";
@@ -21,6 +22,7 @@ async function kata(args: string[], workspace = cwd): Promise<any> {
 }
 const show = (ref: string) => kata(["show", ref, "--json"]);
 let sequence = 0;
+const down = () => ({ code: 1, stdout: "", stderr: "dial tcp: connection refused" });
 const evidence = ["test:bun test pi fixture"];
 const message = "Implemented the stock pi fixture and verified it with the isolated integration suite.";
 const nativeKey = Symbol.for("kata.pi.native.v1");
@@ -95,6 +97,23 @@ beforeEach(() => {
   globalRegistry[nativeKey] = { adapters: new Map() };
 });
 afterAll(async () => { await run(["daemon", "stop"]); delete process.env.KATA_PI_EXECUTABLE; globalRegistry[nativeKey] = previousRegistry; });
+
+test("pi plans in the inferred project of an unregistered repo, or the default project with a repo label", async () => {
+  const repo = (name: string) => { const dir = path.join(scratch, name); mkdirSync(dir); execFileSync("git", ["init", "-q"], { cwd: dir }); execFileSync("git", ["remote", "add", "origin", `https://github.com/someone/${name}.git`], { cwd: dir }); return dir; };
+  const inferred = await host({ cwd: repo("pi-port-inferred") }); await inferred.event("session_start", { reason: "startup" });
+  expect(await inferred.init(["Inferred pi task"])).toMatch(/^pi-port-inferred#/);
+  expect((await kata(["projects", "list", "--json"])).projects.map((p: any) => p.name)).toContain("pi-port-inferred");
+  process.env.KATA_DEFAULT_PROJECT = "pitest";
+  try {
+    const labeled = await host({ cwd: repo("pi-port-labeled") }); await labeled.event("session_start", { reason: "startup" });
+    const ref = await labeled.init(["Labeled pi task"]);
+    expect(ref).toMatch(/^pitest#/);
+    const labeled2 = (await kata(["list", "--project", "pitest", "--label", "pi-port-labeled", "--status", "all", "--json"])).issues;
+    expect(labeled2).toHaveLength(2);
+    const view = await labeled.call({ op: "view" });
+    expect(view.details.phases).toBeUndefined();
+  } finally { delete process.env.KATA_DEFAULT_PROJECT; }
+});
 
 test("pi exits before registering anything when loaded under OMP", async () => {
   const app = await host({ omp: true });
@@ -240,8 +259,8 @@ test("pi adopts a successful Bash claim using isError without OMP exitCode detai
   expect((await app.call({ op: "view" })).details.kata.parent).toBe(`pitest#${ref}`);
 });
 
-test("pi keeps nonproject plans local and failures quiet with bounded hooks", async () => {
-  const app = await host({ cwd: outside }); await app.event("session_start", { reason: "startup" });
+test("pi keeps an unreachable Kata local and failures quiet with bounded hooks", async () => {
+  const app = await host({ cwd: outside, before: down }); await app.event("session_start", { reason: "startup" });
   await app.init(["Local pi task"]);
   expect((await app.call({ op: "done" })).isError).toBeUndefined();
   const prompt = { systemPromptOptions: { sections: {} } };
@@ -312,9 +331,9 @@ for (const order of ["plugin-first", "native-first"]) test.skipIf(!!nativeMissin
 });
 
 test("pi local plans and queued closes survive a fresh extension instance", async () => {
-  const local = await host({cwd:outside}); await local.event("session_start", {reason:"startup"});
+  const local = await host({cwd:outside, before: down}); await local.event("session_start", {reason:"startup"});
   await local.init(["Durable pi local work"]); await local.call({op:"block", reason:"Wait through restart"});
-  const restored = await host({cwd:outside, sid:local.sid, entries:JSON.parse(JSON.stringify(local.entries))});
+  const restored = await host({cwd:outside, before: down, sid:local.sid, entries:JSON.parse(JSON.stringify(local.entries))});
   await restored.event("session_start", {reason:"resume"});
   expect((await restored.call({op:"view"})).content[0].text).toContain("Wait through restart");
   const app = await host({before:(a:string[])=>a[0]==="close"?{code:1,stdout:"",stderr:"sibling close throttle"}:undefined});

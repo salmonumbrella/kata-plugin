@@ -2,7 +2,9 @@
 
 | Symptom | Check |
 | --- | --- |
-| Todo remains local | Supply the qualified issue through `init ref` or `KATA_REF`, or check the saved session binding. Only an unbound folder with no issue reference should use local state. Tracked workers use their assigned issue. |
+| Todo remains local | The plan is session-local only while Kata is unreachable (the first reply says so and a warning appears once). Check `kata list` from the folder, the executable (`KATA_OMP_EXECUTABLE`) and the daemon; the plan replays on the next todo call or within a minute of Kata returning. Tracked workers use their assigned issue. |
+| Plan lands in a project you did not expect | A folder with no Kata project uses `KATA_DEFAULT_PROJECT`, else registers its inferred project. Bind explicitly with `init ref` or `KATA_REF`, or run `kata init --project <name>` in the folder. |
+| `todo` says the default project is missing | `KATA_DEFAULT_PROJECT` must name an existing project; create it with `kata projects create <name>`. |
 | Todo state unavailable | Read the reported Kata error. Once the service recovers, call `view`; failed bindings and reads are retried without presenting cached tasks as current. |
 | Close succeeds with “transcript: current session unavailable or invalid” | Kata 0.20.0 supports only Claude/Codex transcript identities. OMP requires upstream transcript support; do not relabel its UUID as Codex or suppress the diagnostic. |
 | Close refused | Inspect the actual Kata error, evidence, owner, teammate, and current children. Do not force a completed display state. |

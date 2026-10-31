@@ -1,6 +1,6 @@
 # Install
 
-Install Kata 0.19 or later and initialize the intended project with `kata init --project example`. These plugins use `agent-contract-hook`, revision guards, typed evidence, `audit closes`, and `events`.
+Install Kata 0.19 or later. Claude Code needs a Kata project in the folder (`kata init --project example`). Oh-my-pi and pi need nothing more: a folder without a Kata project uses `KATA_DEFAULT_PROJECT` or its inferred project (see the [oh-my-pi reference](../reference/oh-my-pi.md)). These plugins use `agent-contract-hook`, revision guards, typed evidence, `audit closes`, and `events`.
 
 ## Claude Code
 
@@ -24,17 +24,18 @@ omp plugin marketplace add /path/to/kata-plugin
 omp plugin install kata@kata-plugin
 ```
 
-Set this in your OMP YAML configuration and restart:
+Restart omp. There is no `todo.enabled` step: the plugin's `todo` replaces the built-in one, and omp's own todo reminders, nudges and HUD have nothing to track. A `todo.enabled: false` you set earlier keeps working.
 
-```yaml
-todo:
-  enabled: false
+Optional: send the plans of repos that have no Kata project to one Kata project, labeled with the repo name, by exporting it where omp runs:
+
+```sh
+export KATA_DEFAULT_PROJECT=vault
 ```
 
 To try it without installing:
 
 ```sh
-omp --no-extensions --config /path/to/notodo.yml -e /path/to/kata-plugin/plugins/oh-my-pi/kata.ts
+omp --no-extensions -e /path/to/kata-plugin/plugins/oh-my-pi/kata.ts
 ```
 
 ## Pi
