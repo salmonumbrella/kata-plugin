@@ -100,8 +100,11 @@ export default async function piKata(pi: ExtensionAPI) {
 		const id = ctx.sessionManager.getSessionId();
 		if (!id) throw new Error("Pi child needs a real session identity before tracking work.");
 		if (!inherited.ref) {
-			const candidates = JSON.parse(await core.kata(["list", "--status", "all", "--meta", `pi.session_id=${inherited.sessionId}`, "--label", "pi-session", "--limit", "2", "--json"], inherited.workspace)).issues ?? [];
-			const parent = candidates.find((issue: any) => issue.metadata?.["pi.auto_parent"] === true);
+			const project = core.candidate(inherited.workspace).project;
+			let found: any[] = [];
+			try { found = JSON.parse(await core.kata(["list", "--status", "all", ...(project ? ["--project", project] : []), "--meta", `pi.session_id=${inherited.sessionId}`, "--label", "pi-session", "--limit", "2", "--json"], inherited.workspace)).issues ?? []; }
+			catch (error) { if (!project) throw error; core.debug(error); } // the project does not exist yet: no earlier parent
+			const parent = found.find((issue: any) => issue.metadata?.["pi.auto_parent"] === true);
 			if (parent) inherited.ref = parent.qualified_id;
 			else {
 				// A session-start extension can spawn before the lead uses todo.

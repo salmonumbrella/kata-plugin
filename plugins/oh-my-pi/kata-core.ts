@@ -27,8 +27,6 @@ export interface CoreOptions {
 	executable: string;
 	debugFile?: string;
 	explicitRef?(): string | undefined;
-	/** Plugin-level default project; KATA_DEFAULT_PROJECT wins when both exist. */
-	defaultProject?(): string | undefined;
 }
 
 export type Status = "pending" | "in_progress" | "completed" | "abandoned" | "blocked";
@@ -455,13 +453,13 @@ export function createKataCore(host: CoreHost, options: CoreOptions) {
 	}
 
 	// Kata itself cannot run: no executable, or a daemon that cannot be reached.
-	const UNUSABLE = /\bENOENT\b|\bECONN(?:REFUSED|RESET)\b|executable file not found|not found in \$PATH|command not found|connection refused|dial tcp|no such host|daemon[^\n]{0,40}(?:unavailable|unreachable|not running|did not start|failed to start)|unreachable|timed out after/i;
+	const UNUSABLE = /\bENOENT\b|\bECONN(?:REFUSED|RESET)\b|executable file not found|not found in \$PATH|command not found|connection refused|dial tcp|no such host|daemon[^\n]{0,40}(?:unavailable|unreachable|not running|did not start|failed to start)|timed out after/i;
 	// True while Kata answers. An unregistered cwd is not an outage: it resolves
 	// to the default or inferred project. Only an unusable Kata (missing
 	// executable, unreachable daemon) is down, and it is probed again next time.
 	async function probe(cwd: string): Promise<boolean> {
 		if (scope !== "unknown" && scope !== "down") return true;
-		try { await kata(["list", "--limit", "1", "--json"], cwd); scope = "workspace"; }
+		try { await kata(["list", "--limit", "1", "--json"], cwd); scope = "workspace"; refusal = ""; }
 		catch (error) {
 			if (/\bproject_not_initialized\b/.test(String(error))) { scope = "unbound"; refusal = String(error); }
 			else if (UNUSABLE.test(String(error))) { scope = "down"; outage = (error as Error)?.message ?? String(error); debug(error); return false; }
@@ -472,9 +470,9 @@ export function createKataCore(host: CoreHost, options: CoreOptions) {
 
 	// Where a plan created from this cwd lives. Never writes.
 	function candidate(cwd: string): { project?: string; label?: string; register?: boolean } {
-		if (scope !== "unbound") return {};
+		if (!refusal) return {};
 		const name = inferredName(refusal, cwd);
-		const configured = (options.defaultProject?.() ?? process.env.KATA_DEFAULT_PROJECT)?.trim();
+		const configured = process.env.KATA_DEFAULT_PROJECT?.trim();
 		return configured ? { project: configured, label: slug(name) } : { project: name, register: true };
 	}
 
@@ -488,8 +486,8 @@ export function createKataCore(host: CoreHost, options: CoreOptions) {
 	function goLocal(ctx: any) {
 		plan.local = true; delete plan.error;
 		scheduleRetry();
-		if (warnedFor === currentId && warnedFor !== undefined) return;
-		warnedFor = currentId;
+		if (warnedFor === (currentId ?? "")) return;
+		warnedFor = currentId ?? "";
 		if (main(ctx) && host.allowUI?.(ctx) !== false) ctx?.ui?.notify?.(`Kata is unreachable${outage ? ` (${outage})` : ""}. todo keeps a session-local plan and replays it into Kata when Kata returns.`, "warning");
 	}
 
@@ -514,7 +512,9 @@ export function createKataCore(host: CoreHost, options: CoreOptions) {
 			}
 			await advance(cwd);
 		} catch (error) {
-			if (!plan.parent) plan = { tasks: local, local: true };
+			// Whatever Kata took stays; the unreplayed plan is retried (creates are idempotent).
+			plan = { tasks: local, local: true };
+			scheduleRetry();
 			throw error;
 		}
 	}
@@ -593,7 +593,7 @@ export function createKataCore(host: CoreHost, options: CoreOptions) {
 	function setParent(binding: Binding) {
 		scope = "bound";
 		if (!binding.auto) autoParents.delete(binding.parent);
-		if (plan.parent === binding.parent && plan.workspace === binding.workspace && plan.auto === binding.auto) return;
+		if (plan.parent === binding.parent && plan.workspace === binding.workspace && plan.auto === binding.auto && plan.label === binding.label) return;
 		plan = { ...binding, tasks: plan.parent === binding.parent ? plan.tasks : [] };
 		if (binding.auto) autoParents.set(binding.parent, binding);
 		host.appendEntry(STATE_ENTRY, binding);
@@ -1204,7 +1204,7 @@ export function createKataCore(host: CoreHost, options: CoreOptions) {
 		stateEntry: STATE_ENTRY,
 		resetReminders() { reminders = 0; },
 		debug, bounded, serial, kata, actor, owned, work, load, refresh, probe, bind, handBack,
-		ensureParent, destination, adopt, reconcile, drainRetries, apply, execute, command,
+		ensureParent, destination, candidate, adopt, reconcile, drainRetries, apply, execute, command,
 		observeToolResult, remind, warm,
 	};
 }

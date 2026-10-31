@@ -158,6 +158,23 @@ test("an unreachable Kata keeps a visible session-local plan and replays it when
   expect(app.notices.filter(n => n[1] === "warning")).toHaveLength(1);
 });
 
+test("a replay that fails partway keeps the local plan and finishes on the next call", async () => {
+  let down = true, flaky = false;
+  const app = host({ cwd: repo("flakyreplay"), before: (a: string[]) => down ? { code: 1, stdout: "", stderr: "connection refused" }
+    : flaky && a[0] === "create" && a.includes("--parent") ? { code: 1, stdout: "", stderr: "storage hiccup" } : undefined });
+  await app.call({ op: "init", items: ["Kept one", "Kept two"] });
+  down = false; flaky = true;
+  const failed = await app.call({ op: "view" });
+  expect(failed.isError).toBe(true);
+  expect(failed.content[0].text).toContain("could not be replayed");
+  flaky = false;
+  const ok = await app.call({ op: "view" });
+  expect(ok.content[0].text).not.toContain("could not be replayed");
+  expect(ok.isError).toBeUndefined();
+  const shown = await kata(["show", ok.details.kata.parent, "--json"]);
+  expect(shown.children.map((c: any) => c.title).sort()).toEqual(["Kept one", "Kept two"]);
+});
+
 test("a missing executable is an outage too", async () => {
   const app = host({ cwd: repo("noexec"), before: () => { throw new Error("Executable not found in $PATH: \"kata\""); } });
   const first = await app.call({ op: "init", items: ["No binary"] });

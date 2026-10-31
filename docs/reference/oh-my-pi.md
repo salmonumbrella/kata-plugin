@@ -29,13 +29,13 @@ First match wins:
 2. The binding stored in this session.
 3. The folder's own Kata project (`.kata.toml` or a registered inferred name), as before.
 4. `KATA_DEFAULT_PROJECT`. The parent and every task and delegate issue carry a label naming the repo (Kata's inferred project name, else the folder name, lowercased to a valid label), so `kata list --label agentsview` finds them. The project must exist; a mistyped name fails instead of creating a project.
-5. The inferred project: the name Kata would infer from the git remote, else the folder name. The plugin registers it with `kata projects create <name>` and binds to it. It never runs `kata init` and writes nothing into the repo.
+5. The inferred project: the name Kata would infer from the git remote, else the folder name. The plugin registers it with `kata projects create <name>` and binds to it. It never runs `kata init` and writes nothing into the repo. Inferred names are not unique: two checkouts named `app` share one project, and so does a checkout whose name matches an existing project. Set `KATA_DEFAULT_PROJECT` (issues are labeled per repo) or run `kata init --project <name>` where that matters.
 
-Nothing is created until the first plan mutation: a session that never plans leaves no issue and no project. The first `todo init` creates one automatic session parent (a delegation that needs a parent also creates it). The parent closes from its children's evidence as before.
+Nothing is created until the first plan mutation: a session that never plans leaves no issue and no project. The first `todo init` creates one automatic session parent (a task delegation also creates it, since a delegate needs a parent to be tracked, and with it the inferred project). The parent closes from its children's evidence as before.
 
 ## When Kata is unreachable
 
-A missing executable or unreachable daemon is the only case that selects a session-local plan. The plugin warns once per session, keeps the plan in the session entries, and replays it into Kata when Kata answers again: on the next todo call, on resume, or on a 60-second retry. Tasks completed offline replay as closed only if they carry evidence and a 40-character message; otherwise they replay blocked so you can add evidence. `project_not_initialized` never produces a local plan, and missing projects or authentication failures are errors.
+A missing executable or an unreachable or unresponsive daemon (a Kata call that times out) is the only case that selects a session-local plan. The plugin warns once per session, keeps the plan in the session entries, and replays it into Kata when Kata answers again: on the next todo call, on resume, or on a 60-second retry. Tasks completed offline replay as closed only if they carry evidence and a 40-character message; otherwise they replay blocked so you can add evidence. `project_not_initialized` never produces a local plan, and missing projects or authentication failures are errors.
 
 ## Hooks
 
