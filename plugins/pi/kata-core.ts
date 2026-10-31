@@ -459,7 +459,7 @@ export function createKataCore(host: CoreHost, options: CoreOptions) {
 	// executable, unreachable daemon) is down, and it is probed again next time.
 	async function probe(cwd: string): Promise<boolean> {
 		if (scope !== "unknown" && scope !== "down") return true;
-		try { await kata(["list", "--limit", "1", "--json"], cwd); scope = "workspace"; refusal = ""; }
+		try { await kata(["list", "--limit", "1", "--json"], cwd, 15_000); scope = "workspace"; refusal = ""; }
 		catch (error) {
 			if (/\bproject_not_initialized\b/.test(String(error))) { scope = "unbound"; refusal = String(error); }
 			else if (UNUSABLE.test(String(error))) { scope = "down"; outage = (error as Error)?.message ?? String(error); debug(error); return false; }
@@ -508,9 +508,12 @@ export function createKataCore(host: CoreHost, options: CoreOptions) {
 				try {
 					if (t.status === "completed" && !(t.proof?.evidence?.length && (t.proof.message || "").trim().length >= 40)) await transition(task, "blocked", { reason: "Completed while Kata was unreachable; add evidence and close it." }, cwd);
 					else await transition(task, t.status, { ...t.proof, reason: t.blocker }, cwd);
-				} catch (error) { debug(error); }
+				} catch (error) {
+					debug(error);
+					await transition(task, "blocked", { reason: `Replaying "${t.status}" from the offline plan failed: ${(error as Error).message}` }, cwd).catch(debug);
+				}
 			}
-			await advance(cwd);
+			await advance(cwd).catch(debug);
 		} catch (error) {
 			// Whatever Kata took stays; the unreplayed plan is retried (creates are idempotent).
 			plan = { tasks: local, local: true };
@@ -945,7 +948,7 @@ export function createKataCore(host: CoreHost, options: CoreOptions) {
 		currentId ||= ctx.sessionManager?.getSessionId?.();
 		if (plan.local) {
 			try { await replayLocal(ctx); }
-			catch (error) { throw new Error(`Kata is reachable again, but the session-local plan could not be replayed into it: ${(error as Error).message}`); }
+			catch (error) { if (params.op !== "view") throw new Error(`Kata is reachable again, but the session-local plan could not be replayed into it: ${(error as Error).message}`); }
 		}
 		let cwd = plan.workspace || ctx.cwd;
 		const change: Change = { message: params.message?.trim() || undefined, evidence: params.evidence, reason: params.reason?.trim() || undefined };
@@ -1077,7 +1080,7 @@ export function createKataCore(host: CoreHost, options: CoreOptions) {
 	async function execute(params: any, ctx: any) {
 		return serial(async () => {
 			if (boundAgent && boundAgent !== agentKey(ctx)) {
-				return { content: [{ type: "text" as const, text: "Kata agent identity changed; use this worker's own extension context." }], details: { op: params.op, kata: {}, phases: [] }, isError: true };
+				return { content: [{ type: "text" as const, text: "Kata agent identity changed; use this worker's own extension context." }], details: { op: params.op, kata: {} }, isError: true };
 			}
 			try {
 				if (!main(ctx) && !host.binding) throw new Error("The todo plan belongs to the main agent.");

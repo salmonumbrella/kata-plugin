@@ -164,7 +164,7 @@ test("a replay that fails partway keeps the local plan and finishes on the next 
     : flaky && a[0] === "create" && a.includes("--parent") ? { code: 1, stdout: "", stderr: "storage hiccup" } : undefined });
   await app.call({ op: "init", items: ["Kept one", "Kept two"] });
   down = false; flaky = true;
-  const failed = await app.call({ op: "view" });
+  const failed = await app.call({ op: "append", items: ["Kept three"] });
   expect(failed.isError).toBe(true);
   expect(failed.content[0].text).toContain("could not be replayed");
   flaky = false;
@@ -173,6 +173,7 @@ test("a replay that fails partway keeps the local plan and finishes on the next 
   expect(ok.isError).toBeUndefined();
   const shown = await kata(["show", ok.details.kata.parent, "--json"]);
   expect(shown.children.map((c: any) => c.title).sort()).toEqual(["Kept one", "Kept two"]);
+  expect((await app.call({ op: "view" })).content[0].text).not.toContain("Session-local");
 });
 
 test("a missing executable is an outage too", async () => {
